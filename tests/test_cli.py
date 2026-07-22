@@ -7,6 +7,7 @@ pure helpers factored out of the REPL. No network, no interactive REPL.
 from __future__ import annotations
 
 from datetime import datetime
+import re
 
 import pytest
 from typer.testing import CliRunner
@@ -28,6 +29,13 @@ from pion.session import SessionManager
 
 runner = CliRunner()
 
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text: str) -> str:
+    """Return CLI output without terminal styling escape sequences."""
+    return ANSI_ESCAPE_RE.sub("", text)
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -36,7 +44,7 @@ runner = CliRunner()
 def test_help_exits_zero_and_mentions_model() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "--model" in result.output
+    assert "--model" in strip_ansi(result.output)
 
 
 def test_version_prints_version() -> None:

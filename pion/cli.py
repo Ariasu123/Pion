@@ -1,0 +1,596 @@
+"""pion command line interface.
+
+`pion` starts an interactive REPL (streaming, tool-call summaries, slash
+commands); `pion --print "..."` runs a single prompt and exits. Sessions
+persist as JSONL under ~/.pion/sessions (or a file passed via --session),
+with automatic context compaction when the conversation approaches the
+model's context window.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import signal
+import sys
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
+
+import typer
+from rich.console import Console
+from rich.markup import escape
+
+from . import __version__
+from .agent.agent import Agent
+from .agent.events import AgentEvent
+from .hooks import ExtensionManager
+from .llm.registry import ENV_KEY_NAMES, get_model, resolve_api_key
+from .llm.types import (
+    AssistantMessage,
+    Message,
+    Model,
+    TextContent,
+    Usage,
+    UserMessage,
+)
+from .session import SessionManager, compact, estimate_tokens, should_compact
+
+app = typer.Typer(
+    name="pion",
+    help="pion — a minimal, hackable coding agent harness.",
+    add_completion=False,
+)
+
+console = Console()
+err_console = Console(stderr=True)
+
+DEFAULT_MODEL_ID = "deepseek-chat"
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers (unit-tested without network or a REPL)
+# ---------------------------------------------------------------------------
+
+
+def default_session_path(
+    now: Optional[datetime] = None, base_dir: Optional[Path] = None
+) -> Path:
+    """Session file path: <base>/yyyymmdd-HHMMSS-<uuid8>.jsonl.
+
+    `base_dir` defaults to ~/.pion/sessions. The directory is not created
+    here; callers create it when they actually persist.
+    """
+    now = now or datetime.now()
+    base = base_dir or (Path.home() / ".pion" / "sessions")
+    return base / f"{now:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}.jsonl"
+
+
+def parse_slash_command(text: str) -> Optional[tuple[str, str]]:
+    """Parse '/name args' into (name, args); None when not a slash command."""
+    stripped = text.strip()
+    if not stripped.startswith("/") or stripped == "/":
+        return None
+    parts = stripped[1:].split(maxsplit=1)
+    name = parts[0].lower()
+    args = parts[1].strip() if len(parts) > 1 else ""
+    return name, args
+
+
+def summarize_tool_args(name: str, args: dict[str, Any]) -> str:
+    """One-line summary of a tool call: the most telling argument, single line."""
+    for key in ("command", "path", "file_path"):
+        if key in args and args[key] is not None:
+            summary = str(args[key])
+            break
+    else:
+        summary = json.dumps(args, ensure_ascii=False)
+    summary = " ".join(summary.split())
+    if len(summary) > 120:
+        summary = summary[:117] + "..."
+    return summary
+
+
+def summarize_tool_result(text: str, limit: int = 200) -> str:
+    """Short single-line summary of a tool result (first ~`limit` chars)."""
+    summary = " ".join(text.split())
+    if len(summary) > limit:
+        summary = summary[: limit - 3] + "..."
+    return summary
+
+
+def api_key_env_name(model: Model) -> str:
+    """Environment variable holding the API key for `model`'s provider."""
+    return ENV_KEY_NAMES.get(model.provider, f"{model.provider.upper()}_API_KEY")
+
+
+def extension_dirs() -> list[Path]:
+    """Directories searched for extensions (user-level, then project-level)."""
+    return [
+        Path("~/.pion/extensions").expanduser(),
+        Path.cwd() / ".pion" / "extensions",
+    ]
+
+
+def build_system_prompt(cwd: Path) -> str:
+    """Terse pi-style coding-agent system prompt with the working directory."""
+    return f"""You are pion, a coding agent running in the user's terminal.
+
+Working directory: {cwd} (all relative paths resolve here).
+
+Available tools:
+- read: read a UTF-8 text file with line numbers (use offset/limit for large files)
+- write: create or overwrite a file (parent directories are created automatically)
+- edit: exact text replacement in a file (old_string must match uniquely unless replace_all)
+- bash: execute a shell command (combined output, truncated to the last 100KB)
+
+Guidelines:
+- Use the tools to act; don't just describe what you would do.
+- Prefer the read tool over cat, and edit over rewriting whole files.
+- Use bash for file operations like ls, rg, find, and for running builds and tests.
+- Be concise: short, direct answers; no preamble, no repetition of what the user said.
+- Show file paths clearly when working with files.
+- Do what was asked and stop; don't take extra actions the user didn't request."""
+
+
+def find_first_kept_entry_id(session: SessionManager, model: Model) -> Optional[str]:
+    """Session entry id of the earliest message to keep after compaction.
+
+    "Kept" is the newest tail of branch messages totaling roughly <= 50% of
+    the model's context window (estimate_tokens), cut at a user-message
+    boundary so context never resumes mid tool-cycle. Only messages after
+    the newest existing compaction entry are candidates. Returns None when
+    nothing should be kept (the summary replaces the whole prior branch).
+    """
+    entries = []
+    node = session.leaf_id
+    while node is not None:
+        entry = session.get_entry(node)
+        entries.append(entry)
+        node = entry.parent_id
+    entries.reverse()  # root -> leaf
+
+    last_compaction = -1
+    for i, entry in enumerate(entries):
+        if entry.type == "compaction":
+            last_compaction = i
+    candidates = [
+        entry
+        for entry in entries[last_compaction + 1 :]
+        if entry.type == "message" and entry.message is not None
+    ]
+
+    budget = model.context_window // 2
+    kept: list = []
+    total = 0
+    for entry in reversed(candidates):
+        tokens = estimate_tokens([entry.message])
+        if kept and total + tokens > budget:
+            break
+        kept.append(entry)
+        total += tokens
+    kept.reverse()
+
+    # Cut at a user-message boundary: drop leading non-user messages.
+    while kept and not isinstance(kept[0].message, UserMessage):
+        kept.pop(0)
+    return kept[0].id if kept else None
+
+
+# ---------------------------------------------------------------------------
+# Streaming renderer
+# ---------------------------------------------------------------------------
+
+
+class StreamRenderer:
+    """Render AgentEvents to the console while a run streams.
+
+    Assistant text prints as it arrives; thinking blocks render dim; tool
+    calls get a one-line summary, tool results a short dim summary.
+    """
+
+    def __init__(self, out: Console) -> None:
+        self.console = out
+        self._open: Optional[str] = None  # "text" | "thinking" line in progress
+
+    def _close_line(self) -> None:
+        if self._open is not None:
+            self.console.print()
+            self._open = None
+
+    def handle(self, event: AgentEvent) -> None:
+        """Subscriber callback for Agent.subscribe (sync variant)."""
+        if event.type == "message_update" and event.assistant_event is not None:
+            ev = event.assistant_event
+            if ev.type == "thinking_delta" and ev.delta:
+                if self._open != "thinking":
+                    self._close_line()
+                    self._open = "thinking"
+                self.console.print(
+                    ev.delta, end="", style="dim italic", markup=False, highlight=False
+                )
+            elif ev.type == "text_delta" and ev.delta:
+                if self._open != "text":
+                    self._close_line()
+                    self._open = "text"
+                self.console.print(ev.delta, end="", markup=False, highlight=False)
+        elif event.type == "message_end":
+            if isinstance(event.message, AssistantMessage):
+                self._close_line()
+        elif event.type == "tool_execution_start":
+            self._close_line()
+            name = event.tool_name or "tool"
+            summary = escape(summarize_tool_args(name, event.args or {}))
+            self.console.print(f"[cyan]● {escape(name)}[/cyan] [dim]{summary}[/dim]")
+        elif event.type == "tool_execution_end":
+            self._close_line()
+            text = ""
+            if event.result is not None:
+                text = "".join(
+                    block.text
+                    for block in event.result.content
+                    if isinstance(block, TextContent)
+                )
+            summary = escape(summarize_tool_result(text))
+            style = "red" if event.is_error else "dim"
+            self.console.print(f"  ⎿ {summary}", style=style, markup=False)
+
+
+# ---------------------------------------------------------------------------
+# The REPL / single-shot runner
+# ---------------------------------------------------------------------------
+
+
+class Repl:
+    """Interactive session: agent + session store + extensions + console."""
+
+    def __init__(
+        self,
+        agent: Agent,
+        session: SessionManager,
+        session_path: Path,
+        extensions: Optional[ExtensionManager],
+        out: Console,
+    ) -> None:
+        self.agent = agent
+        self.session = session
+        self.session_path = session_path
+        self.extensions = extensions
+        self.console = out
+        self.last_usage: Optional[Usage] = None
+
+    # ------------------------------------------------------------------
+    # Running prompts
+    # ------------------------------------------------------------------
+
+    async def _prompt_with_sigint(self, text: str) -> AssistantMessage:
+        """Run one prompt; Ctrl-C during the run aborts the agent."""
+        loop = asyncio.get_running_loop()
+        installed = False
+        try:
+            loop.add_signal_handler(signal.SIGINT, self.agent.abort)
+            installed = True
+        except (NotImplementedError, RuntimeError, ValueError):
+            # Platform without signal handlers (or not the main thread):
+            # Ctrl-C falls back to interrupting the whole process.
+            installed = False
+        try:
+            return await self.agent.prompt(text)
+        finally:
+            if installed:
+                loop.remove_signal_handler(signal.SIGINT)
+
+    async def handle_prompt(self, text: str, render: bool = True) -> AssistantMessage:
+        """Run one prompt, persist new messages, auto-compact afterwards."""
+        renderer = StreamRenderer(self.console) if render else None
+        if renderer is not None:
+            self.agent.subscribe(renderer.handle)
+        before = len(self.agent.messages)
+        try:
+            final = await self._prompt_with_sigint(text)
+        finally:
+            if renderer is not None:
+                self.agent.unsubscribe(renderer.handle)
+        self.last_usage = final.usage
+
+        for message in self.agent.messages[before:]:
+            self.session.append_message(message)
+
+        if render:
+            if final.stop_reason == "error":
+                self.console.print(
+                    f"[red]Error: {escape(final.error_message or 'unknown error')}[/red]"
+                )
+            elif final.stop_reason == "aborted":
+                self.console.print("[dim]Aborted.[/dim]")
+
+        await self.maybe_compact()
+        return final
+
+    async def maybe_compact(self, force: bool = False) -> None:
+        """Compact the session when the context crosses the threshold.
+
+        Failures are reported but never crash the REPL.
+        """
+        if not self.agent.messages:
+            if force:
+                self.console.print("[dim]Nothing to compact yet.[/dim]")
+            return
+        if not force and not should_compact(self.agent.messages, self.agent.model):
+            return
+        try:
+            if self.extensions is not None:
+                await self.extensions.notify(
+                    "session_before_compact",
+                    {
+                        "session_path": str(self.session_path),
+                        "message_count": len(self.agent.messages),
+                    },
+                )
+            # Compute the kept tail before compact() appends its own entry.
+            kept_id = find_first_kept_entry_id(self.session, self.agent.model)
+            summary = await compact(
+                self.session,
+                self.agent.messages,
+                self.agent.model,
+                self.agent.stream_fn,
+                self.agent.api_key,
+            )
+            # The newest compaction entry wins in build_context, so this one
+            # (with the proper kept-entry id) overrides compact()'s entry.
+            self.session.append_compaction(summary, first_kept_entry_id=kept_id)
+            self.agent.messages = self.session.build_context()
+            self.console.print(
+                f"[dim]Context compacted — summary of {len(summary)} chars, "
+                f"{len(self.agent.messages)} messages kept in context.[/dim]"
+            )
+        except Exception as exc:  # never crash the REPL over compaction
+            self.console.print(
+                f"[yellow]Compaction failed (continuing without it): "
+                f"{escape(str(exc))}[/yellow]"
+            )
+
+    # ------------------------------------------------------------------
+    # Slash commands
+    # ------------------------------------------------------------------
+
+    def _print_help(self) -> None:
+        self.console.print("[bold]Commands[/bold]")
+        rows = [
+            ("/help", "show this help"),
+            ("/model <id>", "switch model (re-resolves the API key); no arg shows current"),
+            ("/compact", "force context compaction now"),
+            ("/stats", "token usage and cost of the last response"),
+            ("/exit", "quit (also Ctrl-D / EOF)"),
+        ]
+        for name, description in rows:
+            self.console.print(f"  [cyan]{name:<14}[/cyan] {description}")
+        if self.extensions is not None and self.extensions.commands:
+            self.console.print("[bold]Extension commands[/bold]")
+            for name in sorted(self.extensions.commands):
+                self.console.print(f"  [cyan]/{name}[/cyan]")
+
+    def _print_stats(self) -> None:
+        usage = self.last_usage
+        if usage is None:
+            self.console.print("[dim]No usage yet — run a prompt first.[/dim]")
+            return
+        cost = usage.cost.total or self.agent.model.compute_cost(usage).total
+        self.console.print(
+            f"[dim]last usage ({self.agent.model.id}): "
+            f"input {usage.input}, output {usage.output}, "
+            f"cache read {usage.cache_read}, cache write {usage.cache_write} — "
+            f"cost ${cost:.6f}[/dim]"
+        )
+
+    def _switch_model(self, args: str) -> None:
+        model_id = args.strip()
+        if not model_id:
+            self.console.print(f"[dim]Current model: {self.agent.model.id}[/dim]")
+            return
+        try:
+            model = get_model(model_id)
+        except KeyError as exc:
+            self.console.print(f"[red]{escape(str(exc.args[0]))}[/red]")
+            return
+        self.agent.model = model
+        self.agent.api_key = resolve_api_key(model)
+        self.console.print(f"[dim]Switched to {model.id} ({model.name}).[/dim]")
+        if self.agent.api_key is None:
+            self.console.print(
+                f"[yellow]No API key found — set {api_key_env_name(model)} "
+                f"or restart with --api-key.[/yellow]"
+            )
+
+    async def handle_slash(self, name: str, args: str) -> bool:
+        """Handle one slash command. Returns True when the REPL should exit."""
+        if name in ("exit", "quit"):
+            return True
+        if name == "help":
+            self._print_help()
+        elif name == "model":
+            self._switch_model(args)
+        elif name == "compact":
+            await self.maybe_compact(force=True)
+        elif name == "stats":
+            self._print_stats()
+        elif self.extensions is not None and name in self.extensions.commands:
+            command = self.extensions.commands[name]
+            result = command()
+            if inspect.isawaitable(result):
+                result = await result
+            if result is not None:
+                self.console.print(str(result))
+        else:
+            self.console.print(f"[red]Unknown command: /{escape(name)}[/red] — try /help")
+        return False
+
+    # ------------------------------------------------------------------
+    # Loops
+    # ------------------------------------------------------------------
+
+    def _print_banner(self) -> None:
+        self.console.print(
+            f"[bold]pion[/bold] {__version__} — model [cyan]{escape(self.agent.model.id)}[/cyan]"
+        )
+        self.console.print(
+            f"[dim]cwd: {Path.cwd()}  session: {self.session_path}[/dim]"
+        )
+        self.console.print("[dim]/help for commands, /exit or Ctrl-D to quit[/dim]")
+
+    async def run(self) -> None:
+        """Interactive input()-based REPL loop."""
+        self._print_banner()
+        while True:
+            try:
+                line = input("pion> ")
+            except EOFError:
+                self.console.print("\n[dim]Bye.[/dim]")
+                return
+            line = line.strip()
+            if not line:
+                continue
+            parsed = parse_slash_command(line)
+            if parsed is not None:
+                try:
+                    should_exit = await self.handle_slash(*parsed)
+                except Exception as exc:
+                    self.console.print(f"[red]Command failed: {escape(str(exc))}[/red]")
+                    should_exit = False
+                if should_exit:
+                    return
+                continue
+            try:
+                await self.handle_prompt(line)
+            except Exception as exc:  # a failed prompt must not kill the REPL
+                self.console.print(f"[red]Error: {escape(str(exc))}[/red]")
+
+    async def run_print(self, text: str) -> None:
+        """Single-shot mode: run one prompt, print the final text, exit."""
+        final = await self.handle_prompt(text, render=False)
+        if final.stop_reason in ("error", "aborted"):
+            err_console.print(
+                f"[red]Error: {escape(final.error_message or final.stop_reason)}[/red]"
+            )
+            raise typer.Exit(1)
+        sys.stdout.write(final.text() + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"pion {__version__}")
+        raise typer.Exit()
+
+
+async def _async_main(
+    model: Model,
+    api_key: str,
+    session_path: Optional[Path],
+    no_extensions: bool,
+    print_prompt: Optional[str],
+) -> None:
+    # Extensions (missing dirs are skipped; load errors are dim warnings).
+    extensions: Optional[ExtensionManager] = None
+    if not no_extensions:
+        extensions = ExtensionManager()
+        dirs = [path for path in extension_dirs() if path.is_dir()]
+        if dirs:
+            await extensions.load(dirs)
+        for error in extensions.errors:
+            err_console.print(f"[dim yellow]Extension error: {error}[/dim yellow]")
+
+    # Session: resume an existing JSONL file, or start a new one.
+    if session_path is not None and session_path.exists():
+        try:
+            session = SessionManager.load(session_path)
+        except Exception as exc:
+            err_console.print(
+                f"[red]Error:[/red] could not load session {session_path}: {exc}"
+            )
+            raise typer.Exit(1)
+    else:
+        if session_path is None:
+            session_path = default_session_path()
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+        session = SessionManager(session_path)
+
+    agent = Agent(
+        model=model,
+        system_prompt=build_system_prompt(Path.cwd()),
+        api_key=api_key,
+        extension_manager=extensions,
+    )
+    agent.messages = session.build_context()
+
+    repl = Repl(agent, session, session_path, extensions, console)
+    if print_prompt is not None:
+        await repl.run_print(print_prompt)
+    else:
+        await repl.run()
+
+
+@app.command()
+def main(
+    model_id: str = typer.Option(
+        DEFAULT_MODEL_ID, "--model", "-m", help="Model id from the registry."
+    ),
+    api_key: Optional[str] = typer.Option(
+        None, "--api-key", help="API key (default: provider env var, e.g. DEEPSEEK_API_KEY)."
+    ),
+    base_url: Optional[str] = typer.Option(
+        None, "--base-url", help="Override the model's API base URL."
+    ),
+    session: Optional[Path] = typer.Option(
+        None, "--session", help="Resume (or create) a JSONL session file."
+    ),
+    no_extensions: bool = typer.Option(
+        False, "--no-extensions", help="Do not load any extensions."
+    ),
+    print_prompt: Optional[str] = typer.Option(
+        None, "--print", "-p", help="Run a single prompt, print the reply, and exit."
+    ),
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-v",
+        callback=_version_callback,
+        is_eager=True,
+        help="Print the version and exit.",
+    ),
+) -> None:
+    """pion: a minimal, hackable coding agent. No arguments starts the REPL."""
+    try:
+        model = get_model(model_id)
+    except KeyError as exc:
+        # soft_wrap: the available-id list must survive unwrapped (tests assert on it).
+        err_console.print(f"[red]Error:[/red] {escape(str(exc.args[0]))}", soft_wrap=True)
+        raise typer.Exit(1) from None
+    if base_url:
+        model = model.model_copy(update={"base_url": base_url})
+
+    key = api_key or resolve_api_key(model)
+    if key is None:
+        err_console.print(
+            f"[red]Error:[/red] no API key for provider '{model.provider}'. "
+            f"Set {api_key_env_name(model)} or pass --api-key.",
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+
+    try:
+        asyncio.run(_async_main(model, key, session, no_extensions, print_prompt))
+    except KeyboardInterrupt:
+        # Ctrl-C outside a run (e.g. at the input prompt).
+        err_console.print("\n[dim]Interrupted.[/dim]")
+        raise typer.Exit(130) from None
+
+
+if __name__ == "__main__":  # pragma: no cover
+    app()

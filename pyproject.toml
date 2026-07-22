@@ -1,0 +1,49 @@
+[project]
+name = "pion"
+version = "0.1.0"
+description = "A minimal, hackable coding agent harness in Python — architecture inspired by pi (github.com/earendil-works/pi)"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Pion contributors" }]
+requires-python = ">=3.11"
+keywords = ["llm", "agent", "coding-agent", "openai", "anthropic", "deepseek", "kimi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.6",
+    "typer>=0.12",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+
+[project.scripts]
+pion = "pion.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/your-name/pion"
+Repository = "https://github.com/your-name/pion"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pion"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

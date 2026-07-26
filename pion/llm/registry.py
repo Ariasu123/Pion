@@ -25,9 +25,9 @@ ENV_KEY_NAMES: dict[str, str] = {
 # million tokens, captured at the time of writing — verify against the
 # providers' current pricing pages before relying on cost numbers.
 KNOWN_MODELS: dict[str, Model] = {
-    "deepseek-chat": Model(
-        id="deepseek-chat",
-        name="DeepSeek Chat",
+    "deepseek-v4-flash": Model(
+        id="deepseek-v4-flash",
+        name="DeepSeek V4 Flash",
         api="openai-completions",
         provider="deepseek",
         baseUrl="https://api.deepseek.com",
@@ -36,9 +36,9 @@ KNOWN_MODELS: dict[str, Model] = {
         # Approximate list prices (cache write = regular input).
         cost=ModelCost(input=0.27, output=1.10, cacheRead=0.07),
     ),
-    "deepseek-reasoner": Model(
-        id="deepseek-reasoner",
-        name="DeepSeek Reasoner",
+    "deepseek-v4-pro": Model(
+        id="deepseek-v4-pro",
+        name="DeepSeek V4 Pro",
         api="openai-completions",
         provider="deepseek",
         baseUrl="https://api.deepseek.com",

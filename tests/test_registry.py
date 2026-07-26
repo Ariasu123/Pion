@@ -9,15 +9,15 @@ from pion.llm.types import Model
 
 
 def test_get_model_openai_api_model() -> None:
-    model = registry.get_model("deepseek-chat")
-    assert model.id == "deepseek-chat"
+    model = registry.get_model("deepseek-v4-flash")
+    assert model.id == "deepseek-v4-flash"
     assert model.api == "openai-completions"
     assert model.provider == "deepseek"
     assert model.base_url == "https://api.deepseek.com"
     assert model.context_window == 64000
     assert model.max_tokens == 8192
 
-    reasoner = registry.get_model("deepseek-reasoner")
+    reasoner = registry.get_model("deepseek-v4-pro")
     assert reasoner.reasoning is True
 
 
@@ -48,14 +48,14 @@ def test_get_model_unknown_id_raises_with_available_ids() -> None:
     message = str(exc_info.value)
     assert "no-such-model" in message
     assert "Available" in message
-    assert "deepseek-chat" in message
+    assert "deepseek-v4-flash" in message
 
 
 def test_list_models() -> None:
     ids = {model.id for model in registry.list_models()}
     for expected in (
-        "deepseek-chat",
-        "deepseek-reasoner",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
         "kimi-k2-0905-preview",
         "glm-4.6",
         "qwen3-max",
@@ -67,18 +67,18 @@ def test_list_models() -> None:
 
 def test_base_url_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://proxy.example.com/v1")
-    model = registry.get_model("deepseek-chat")
+    model = registry.get_model("deepseek-v4-flash")
     assert model.base_url == "https://proxy.example.com/v1"
     # The registered entry itself must not be mutated.
-    assert registry.KNOWN_MODELS["deepseek-chat"].base_url == "https://api.deepseek.com"
+    assert registry.KNOWN_MODELS["deepseek-v4-flash"].base_url == "https://api.deepseek.com"
 
 
 def test_resolve_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
-    assert registry.resolve_api_key(registry.get_model("deepseek-chat")) == "sk-deepseek"
+    assert registry.resolve_api_key(registry.get_model("deepseek-v4-flash")) == "sk-deepseek"
 
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    assert registry.resolve_api_key(registry.get_model("deepseek-chat")) is None
+    assert registry.resolve_api_key(registry.get_model("deepseek-v4-flash")) is None
 
 
 def test_env_key_names_cover_registered_providers() -> None:

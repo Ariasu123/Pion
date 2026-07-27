@@ -40,6 +40,7 @@ from ..llm.types import (
     Tool,
     ToolCall,
     ToolResultMessage,
+    sanitize_message,
 )
 from ..tools.base import AgentTool, AgentToolResult, validate_arguments
 from .events import AgentEvent
@@ -377,6 +378,9 @@ async def _stream_assistant_response(
                 )
         elif event.type in ("done", "error"):
             final_message = await response.result()
+            # Scrub lone surrogates coming from the provider (unpaired
+            # \uXXXX escapes) before the message enters the context.
+            final_message = sanitize_message(final_message)
             if added_partial:
                 context.messages[-1] = final_message
             else:
@@ -387,6 +391,7 @@ async def _stream_assistant_response(
 
     # Stream ended without done/error: result() raises (contract violation).
     final_message = await response.result()
+    final_message = sanitize_message(final_message)
     if added_partial:
         context.messages[-1] = final_message
     else:

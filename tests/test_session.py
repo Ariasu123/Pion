@@ -294,3 +294,67 @@ async def test_compact_raises_on_error_event() -> None:
         assert "provider exploded" in str(exc)
     else:
         raise AssertionError("expected RuntimeError")
+
+
+# ---------------------------------------------------------------------------
+# Lone-surrogate sanitization
+# ---------------------------------------------------------------------------
+
+
+def test_load_sanitizes_poisoned_session_file(tmp_path):
+    """A JSONL line containing an unpaired \\uXXXX escape must be healed."""
+    entry = SessionEntry(type="message", parentId=None, message=_user("clean"))
+    line = entry.model_dump_json(by_alias=True, exclude_none=True)
+    poisoned = line.replace("clean", "dirty \\udce6 text")
+    path = tmp_path / "poisoned.jsonl"
+    path.write_text(poisoned + "\n", encoding="utf-8")
+
+    session = SessionManager.load(path)
+    message = session.build_context()[0]
+    assert isinstance(message, UserMessage)
+    assert "\udce6" not in message.content
+    message.model_dump_json()  # pre-fix: UnicodeEncodeError here
+
+
+def test_sanitize_text_unit_cases():
+    from pion.llm.types import sanitize_text
+
+    # Clean text (including non-ASCII) is untouched.
+    assert sanitize_text("帮我写代码 ✓") == "帮我写代码 ✓"
+    # surrogateescape-range bytes round-trip and become U+FFFD.
+    assert sanitize_text("a\udce6b") == "a�b"
+    # Surrogates outside the surrogateescape range hit the fallback path.
+    result = sanitize_text("x\ud800y")
+    assert "\ud800" not in result
+    result.encode("utf-8")  # must always be serializable
+    # A paired surrogate is a legit character and must survive.
+    assert sanitize_text("emoji \U0001f600") == "emoji \U0001f600"
+
+
+def test_sanitize_message_covers_all_text_fields():
+    from pion.llm.types import sanitize_message
+
+    assistant = AssistantMessage(
+        content=[
+            TextContent(text="t\udce6"),
+            ThinkingContent(thinking="th\udce6"),
+        ],
+        stop_reason="error",
+        error_message="e\udce6",
+    )
+    sanitize_message(assistant)
+    assert assistant.content[0].text == "t�"
+    assert assistant.content[1].thinking == "th�"
+    assert assistant.error_message == "e�"
+
+    result = ToolResultMessage(
+        tool_call_id="c1",
+        tool_name="bash",
+        content=[TextContent(text="o\udce6")],
+    )
+    sanitize_message(result)
+    assert result.content[0].text == "o�"
+
+    structured_user = UserMessage(content=[TextContent(text="u\udce6")])
+    sanitize_message(structured_user)
+    assert structured_user.content[0].text == "u�"

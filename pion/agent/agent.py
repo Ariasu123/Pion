@@ -15,7 +15,13 @@ from typing import Any, Callable, Optional
 
 from ..hooks import ExtensionManager, ToolCallEvent, ToolResultEvent
 from ..llm import stream_simple as _default_stream_fn
-from ..llm.types import AssistantMessage, Message, Model, UserMessage
+from ..llm.types import (
+    AssistantMessage,
+    Message,
+    Model,
+    UserMessage,
+    sanitize_text,
+)
 from ..tools import DEFAULT_TOOLS
 from ..tools.base import AgentTool
 from .events import AgentEvent
@@ -118,7 +124,7 @@ class Agent:
                     prompt=text, system_prompt=system_prompt
                 )
 
-            prompts: list[Message] = [*injected, UserMessage(content=text)]
+            prompts: list[Message] = [*injected, UserMessage(content=sanitize_text(text))]
             context = AgentContext(
                 system_prompt=system_prompt,
                 messages=list(self.messages),

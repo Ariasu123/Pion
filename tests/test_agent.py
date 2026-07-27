@@ -569,3 +569,45 @@ async def test_agent_pending_tool_calls_tracked():
 
     assert seen_pending == [set()]  # empty again by execution_end
     assert agent.pending_tool_calls == set()
+
+
+# ---------------------------------------------------------------------------
+# Lone-surrogate sanitization (reproduction tests for the serialization bug)
+# ---------------------------------------------------------------------------
+
+
+async def test_prompt_with_lone_surrogate_user_input_survives_persist(tmp_path):
+    """User input decoded with surrogateescape must not crash session writes."""
+    from pion.session import SessionManager
+
+    agent, _, _ = make_agent([{"text": "ok"}])
+    final = await agent.prompt("帮我 \udce6 写代码")
+    assert final.text() == "ok"
+
+    session = SessionManager(tmp_path / "s.jsonl")
+    for message in agent.messages:  # pre-fix: model_dump_json raises here
+        session.append_message(message)
+
+
+async def test_prompt_sanitizes_surrogates_from_provider_stream():
+    """Unpaired \\uXXXX escapes in provider JSON must not poison messages."""
+    agent, _, _ = make_agent([{"text": "provider \udce6 output"}])
+    final = await agent.prompt("go")
+    assert "\udce6" not in final.text()
+    assert "\udce6" not in agent.messages[-1].text()
+
+
+async def test_error_message_with_surrogate_does_not_cascade():
+    """A poisoned error_message must not break every subsequent prompt."""
+    agent, _, _ = make_agent(
+        [
+            {"stop_reason": "error", "error_message": "boom \udce6"},
+            {"text": "recovered"},
+        ]
+    )
+    final = await agent.prompt("go")
+    assert final.stop_reason == "error"
+    assert "\udce6" not in (agent.error_message or "")
+    # The next prompt must work (pre-fix the poisoned message kills it).
+    recovered = await agent.prompt("again")
+    assert recovered.text() == "recovered"

@@ -17,6 +17,46 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def sanitize_text(text: str) -> str:
+    """Scrub lone surrogates from `text` so it always serializes to UTF-8.
+
+    Lone surrogates sneak in via stdin's surrogateescape decoding (invalid
+    UTF-8 bytes become \\udc80-\\udcff) or via unpaired \\uXXXX escapes in
+    provider JSON. The first pass reverses surrogateescape back to the
+    original bytes, then decodes with "replace" (invalid bytes become
+    U+FFFD). Surrogates outside the surrogateescape range (e.g. \\ud800)
+    make that encode fail, so fall back to a plain lossy encode.
+    """
+    try:
+        return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "replace").decode("utf-8")
+
+
+def sanitize_message(message: "Message") -> "Message":
+    """Return `message` with all text fields scrubbed of lone surrogates."""
+    if isinstance(message, UserMessage):
+        if isinstance(message.content, str):
+            message.content = sanitize_text(message.content)
+        else:
+            for block in message.content:
+                if isinstance(block, TextContent):
+                    block.text = sanitize_text(block.text)
+    elif isinstance(message, AssistantMessage):
+        for block in message.content:
+            if isinstance(block, TextContent):
+                block.text = sanitize_text(block.text)
+            elif isinstance(block, ThinkingContent):
+                block.thinking = sanitize_text(block.thinking)
+        if message.error_message is not None:
+            message.error_message = sanitize_text(message.error_message)
+    else:  # ToolResultMessage
+        for block in message.content:
+            if isinstance(block, TextContent):
+                block.text = sanitize_text(block.text)
+    return message
+
+
 class PiModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 

@@ -26,7 +26,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import Field
 
-from ..llm.types import Message, PiModel, UserMessage
+from ..llm.types import Message, PiModel, UserMessage, sanitize_message
 
 
 def _now_ms() -> int:
@@ -76,7 +76,12 @@ class SessionManager:
 
     @classmethod
     def load(cls, path: Path) -> "SessionManager":
-        """Replay a JSONL session file; future appends keep writing to it."""
+        """Replay a JSONL session file; future appends keep writing to it.
+
+        Messages are sanitized on the way in: older files may contain
+        unpaired \\uXXXX escapes (lone surrogates) that would otherwise make
+        every later serialization fail.
+        """
         manager = cls(path)
         with open(path, "r", encoding="utf-8") as fh:
             for line in fh:
@@ -84,6 +89,8 @@ class SessionManager:
                 if not line:
                     continue
                 entry = SessionEntry.model_validate(json.loads(line))
+                if entry.message is not None:
+                    entry.message = sanitize_message(entry.message)
                 manager._entries[entry.id] = entry
                 manager._order.append(entry.id)
                 manager._leaf_id = entry.id

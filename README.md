@@ -1,7 +1,7 @@
 # Pion
 
 <p align="center">
-  <img src="./docs/assets/pion-cover.png" alt="Pion cover" width="640">
+  <img src="./docs/assets/pion-cover.png" alt="Pion cover" width="480">
 </p>
 
 ---

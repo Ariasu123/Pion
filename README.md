@@ -1,8 +1,18 @@
-<p align="right">
-  <strong>English</strong> · <a href="./README.zh-CN.md">简体中文</a>
+# Pion
+
+<p align="center">
+  <img src="./docs/assets/pion-cover.png" alt="Pion cover" width="100%">
 </p>
 
-# Pion
+---
+
+<p align="center">
+  <strong>English</strong> | <a href="./README.zh-CN.md">中文</a>
+</p>
+
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Sandbox-2496ED?logo=docker&logoColor=white)
+[![License](https://img.shields.io/badge/License-MIT-69B34C)](./LICENSE)
 
 Pion is a lightweight, extensible Python coding-agent project inspired by the open-source pi agent; it currently provides a foundation for agent loops, LLM providers, tools, sessions, and hooks, and will evolve through further experimentation and extensions.
 

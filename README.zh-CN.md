@@ -1,8 +1,18 @@
-<p align="right">
-  <a href="./README.md">English</a> · <strong>简体中文</strong>
+# Pion
+
+<p align="center">
+  <img src="./docs/assets/pion-cover.png" alt="Pion 封面" width="100%">
 </p>
 
-# Pion
+---
+
+<p align="center">
+  <a href="./README.md">English</a> | <strong>中文</strong>
+</p>
+
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Sandbox-2496ED?logo=docker&logoColor=white)
+[![License](https://img.shields.io/badge/License-MIT-69B34C)](./LICENSE)
 
 Pion 是一个受开源项目 pi agent 启发的轻量、可扩展 Python 编码智能体项目；当前为 agent 循环、LLM 提供商、工具、会话和钩子提供基础能力，后续将在此基础上持续进行实验与扩展。
 

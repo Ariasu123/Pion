@@ -8,11 +8,14 @@ text-only subset. Output is capped at MAX_LINES lines or MAX_BYTES bytes
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from ..sandbox.base import SandboxRuntime
+from ..sandbox.workspace import WorkspaceAccessError, WorkspaceGuard
 from .base import AgentToolResult, OnUpdate
 
 MAX_LINES = 1000
@@ -41,6 +44,14 @@ class ReadTool:
     Args = ReadArgs
     execution_mode = "parallel"
 
+    def __init__(
+        self,
+        guard: WorkspaceGuard | None = None,
+        runtime: SandboxRuntime | None = None,
+    ) -> None:
+        self.guard = guard
+        self.runtime = runtime
+
     @property
     def parameters(self) -> dict[str, Any]:
         return self.Args.model_json_schema()
@@ -55,19 +66,46 @@ class ReadTool:
         if abort is not None and abort.is_set():
             return AgentToolResult.text("Error: operation aborted")
 
-        path = Path(args.path).expanduser()
         try:
-            raw = path.read_bytes()
+            path = (
+                self.guard.resolve(args.path, "read")
+                if self.guard is not None
+                else Path(args.path).expanduser()
+            )
+        except WorkspaceAccessError as exc:
+            return AgentToolResult.text(
+                f"Error: {exc}",
+                details=self._details({"denied": True}),
+            )
+        try:
+            if self.guard is not None:
+                fd = self.guard.open_file(args.path, "read", os.O_RDONLY)
+                with os.fdopen(fd, "rb") as handle:
+                    raw = handle.read()
+            else:
+                raw = path.read_bytes()
         except FileNotFoundError:
-            return AgentToolResult.text(f"Error: file not found: {args.path}")
+            return AgentToolResult.text(
+                f"Error: file not found: {args.path}",
+                details=self._details({}),
+            )
         except IsADirectoryError:
-            return AgentToolResult.text(f"Error: path is a directory, not a file: {args.path}")
+            return AgentToolResult.text(
+                f"Error: path is a directory, not a file: {args.path}",
+                details=self._details({}),
+            )
         except OSError as exc:
-            return AgentToolResult.text(f"Error: could not read {args.path}: {exc}")
+            return AgentToolResult.text(
+                f"Error: could not read {args.path}: {exc}",
+                details=self._details({}),
+            )
         try:
             text = raw.decode("utf-8")
         except UnicodeDecodeError:
-            return AgentToolResult.text(f"Error: {args.path} is not valid UTF-8 text")
+            return AgentToolResult.text(
+                f"Error: {args.path} is not valid UTF-8 text",
+                details=self._details({}),
+            )
 
         lines = text.split("\n")
         total_lines = len(lines)
@@ -80,7 +118,13 @@ class ReadTool:
         if start >= total_lines:
             return AgentToolResult.text(
                 f"Error: offset {args.offset} is beyond end of file ({total_lines} lines total)",
-                details={"truncated": False, "linesReturned": 0, "totalLines": total_lines},
+                details=self._details(
+                    {
+                        "truncated": False,
+                        "linesReturned": 0,
+                        "totalLines": total_lines,
+                    }
+                ),
             )
 
         selected = lines[start:]
@@ -116,9 +160,16 @@ class ReadTool:
 
         return AgentToolResult.text(
             output,
-            details={
-                "truncated": truncated,
-                "linesReturned": len(out_lines),
-                "totalLines": total_lines,
-            },
+            details=self._details(
+                {
+                    "truncated": truncated,
+                    "linesReturned": len(out_lines),
+                    "totalLines": total_lines,
+                }
+            ),
         )
+
+    def _details(self, values: dict[str, object]) -> dict[str, object]:
+        if self.runtime is None:
+            return values
+        return {**self.runtime.describe(), **values}

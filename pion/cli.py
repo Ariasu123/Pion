@@ -45,6 +45,12 @@ from .llm.types import (
     UserMessage,
 )
 from .session import SessionManager, compact, estimate_tokens, should_compact
+from .sandbox import (
+    SandboxError,
+    SandboxSettings,
+    build_runtime,
+)
+from .tools import build_default_tools
 
 app = typer.Typer(
     name="pion",
@@ -304,12 +310,44 @@ def resolve_startup(
     return configured.to_model(), configured.api_key
 
 
-def extension_dirs() -> list[Path]:
+def resolve_sandbox_settings(
+    config: PionConfig,
+    *,
+    backend: str | None = None,
+    image: str | None = None,
+    network: str | None = None,
+    git_write: bool = False,
+) -> SandboxSettings:
+    """Apply CLI sandbox overrides on top of the persisted v1 config."""
+    updates: dict[str, object] = {}
+    if backend is not None:
+        if backend not in ("docker", "off"):
+            raise ConfigError("--sandbox must be 'docker' or 'off'")
+        updates["backend"] = backend
+    if image is not None:
+        if not image.strip():
+            raise ConfigError("--sandbox-image cannot be empty")
+        updates["image"] = image.strip()
+    if network is not None:
+        if network not in ("bridge", "none"):
+            raise ConfigError("--sandbox-network must be 'bridge' or 'none'")
+        updates["network"] = network
+    if git_write:
+        updates["git_write"] = True
+    try:
+        return SandboxSettings.model_validate(
+            {**config.sandbox.model_dump(mode="python"), **updates}
+        )
+    except ValueError as exc:
+        raise ConfigError(f"invalid sandbox settings: {exc}") from exc
+
+
+def extension_dirs(include_project: bool = True) -> list[Path]:
     """Directories searched for extensions (user-level, then project-level)."""
-    return [
-        Path("~/.pion/extensions").expanduser(),
-        Path.cwd() / ".pion" / "extensions",
-    ]
+    directories = [Path("~/.pion/extensions").expanduser()]
+    if include_project:
+        directories.append(Path.cwd() / ".pion" / "extensions")
+    return directories
 
 
 def build_system_prompt(cwd: Path) -> str:
@@ -693,45 +731,89 @@ async def _async_main(
     session_path: Optional[Path],
     no_extensions: bool,
     print_prompt: Optional[str],
+    sandbox_settings: SandboxSettings,
+    allow_project_extensions: bool,
 ) -> None:
-    # Extensions (missing dirs are skipped; load errors are dim warnings).
-    extensions: Optional[ExtensionManager] = None
-    if not no_extensions:
-        extensions = ExtensionManager()
-        dirs = [path for path in extension_dirs() if path.is_dir()]
-        if dirs:
-            await extensions.load(dirs)
-        for error in extensions.errors:
-            err_console.print(f"[dim yellow]Extension error: {error}[/dim yellow]")
-
-    # Session: resume an existing JSONL file, or start a new one.
-    if session_path is not None and session_path.exists():
+    runtime = build_runtime(sandbox_settings, Path.cwd())
+    try:
         try:
-            session = SessionManager.load(session_path)
-        except Exception as exc:
+            # Fail before constructing the Agent or issuing any model request.
+            await runtime.start()
+        except SandboxError as exc:
             err_console.print(
-                f"[red]Error:[/red] could not load session {session_path}: {exc}"
+                f"[red]Sandbox startup failed:[/red] {escape(str(exc))}",
+                soft_wrap=True,
             )
-            raise typer.Exit(1)
-    else:
-        if session_path is None:
-            session_path = default_session_path()
-        session_path.parent.mkdir(parents=True, exist_ok=True)
-        session = SessionManager(session_path)
+            raise typer.Exit(1) from exc
 
-    agent = Agent(
-        model=model,
-        system_prompt=build_system_prompt(Path.cwd()),
-        api_key=api_key,
-        extension_manager=extensions,
-    )
-    agent.messages = session.build_context()
+        if sandbox_settings.backend == "docker" and sandbox_settings.network == "bridge":
+            err_console.print(
+                "[yellow]Sandbox notice:[/yellow] Docker bridge networking is enabled; "
+                "it does not prevent source exfiltration. Use "
+                "--sandbox-network none for untrusted repositories.",
+                soft_wrap=True,
+            )
 
-    repl = Repl(agent, session, session_path, extensions, console)
-    if print_prompt is not None:
-        await repl.run_print(print_prompt)
-    else:
-        await repl.run()
+        # Project extensions are host Python code and are disabled by default
+        # whenever a sandbox policy is active.
+        extensions: Optional[ExtensionManager] = None
+        if not no_extensions:
+            extensions = ExtensionManager()
+            include_project = (
+                sandbox_settings.backend == "off" or allow_project_extensions
+            )
+            if (
+                sandbox_settings.backend != "off"
+                and allow_project_extensions
+            ):
+                err_console.print(
+                    "[bold yellow]WARNING:[/bold yellow] project extensions execute "
+                    "as trusted Python in the host Pion process and can bypass the sandbox.",
+                    soft_wrap=True,
+                )
+            dirs = [
+                path
+                for path in extension_dirs(include_project=include_project)
+                if path.is_dir()
+            ]
+            if dirs:
+                await extensions.load(dirs)
+            for error in extensions.errors:
+                err_console.print(
+                    f"[dim yellow]Extension error: {error}[/dim yellow]"
+                )
+
+        # Session: resume an existing JSONL file, or start a new one.
+        if session_path is not None and session_path.exists():
+            try:
+                session = SessionManager.load(session_path)
+            except Exception as exc:
+                err_console.print(
+                    f"[red]Error:[/red] could not load session {session_path}: {exc}"
+                )
+                raise typer.Exit(1)
+        else:
+            if session_path is None:
+                session_path = default_session_path()
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            session = SessionManager(session_path)
+
+        agent = Agent(
+            model=model,
+            tools=build_default_tools(runtime),
+            system_prompt=build_system_prompt(Path.cwd()),
+            api_key=api_key,
+            extension_manager=extensions,
+        )
+        agent.messages = session.build_context()
+
+        repl = Repl(agent, session, session_path, extensions, console)
+        if print_prompt is not None:
+            await repl.run_print(print_prompt)
+        else:
+            await repl.run()
+    finally:
+        await runtime.close()
 
 
 @app.command()
@@ -757,6 +839,31 @@ def main(
     no_extensions: bool = typer.Option(
         False, "--no-extensions", help="Do not load any extensions."
     ),
+    sandbox: Optional[str] = typer.Option(
+        None,
+        "--sandbox",
+        help="Execution backend: docker (default) or off (unrestricted host).",
+    ),
+    sandbox_image: Optional[str] = typer.Option(
+        None,
+        "--sandbox-image",
+        help="Use an existing custom Docker sandbox image.",
+    ),
+    sandbox_network: Optional[str] = typer.Option(
+        None,
+        "--sandbox-network",
+        help="Docker network mode: bridge (default) or none.",
+    ),
+    sandbox_git_write: bool = typer.Option(
+        False,
+        "--sandbox-git-write",
+        help="Allow writes to Git metadata from sandboxed tools.",
+    ),
+    allow_project_extensions: bool = typer.Option(
+        False,
+        "--allow-project-extensions",
+        help="Load project Python extensions on the host even when sandboxed.",
+    ),
     print_prompt: Optional[str] = typer.Option(
         None, "--print", "-p", help="Run a single prompt, print the reply, and exit."
     ),
@@ -771,6 +878,14 @@ def main(
 ) -> None:
     """pion: a minimal, hackable coding agent. No arguments starts the REPL."""
     try:
+        config, _ = _load_user_config()
+        sandbox_settings = resolve_sandbox_settings(
+            config,
+            backend=sandbox,
+            image=sandbox_image,
+            network=sandbox_network,
+            git_write=sandbox_git_write,
+        )
         model, key = resolve_startup(
             model_id=model_id,
             api_key=api_key,
@@ -785,8 +900,25 @@ def main(
         err_console.print("\n[dim]Configuration cancelled.[/dim]")
         raise typer.Exit(130) from None
 
+    if sandbox_settings.backend == "off":
+        err_console.print(
+            "[bold red]WARNING: SANDBOX DISABLED.[/bold red] Shell and file tools "
+            "can access the entire host. Project extensions also run with host privileges.",
+            soft_wrap=True,
+        )
+
     try:
-        asyncio.run(_async_main(model, key, session, no_extensions, print_prompt))
+        asyncio.run(
+            _async_main(
+                model,
+                key,
+                session,
+                no_extensions,
+                print_prompt,
+                sandbox_settings,
+                allow_project_extensions,
+            )
+        )
     except KeyboardInterrupt:
         # Ctrl-C outside a run (e.g. at the input prompt).
         err_console.print("\n[dim]Interrupted.[/dim]")

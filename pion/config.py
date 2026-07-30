@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .llm.types import Model
+from .sandbox.base import SandboxSettings
 
 ApiProtocol = Literal["openai-completions", "anthropic-messages"]
 
@@ -51,6 +52,7 @@ class PionConfig(BaseModel):
     version: Literal[1] = 1
     active_profile: str | None = None
     profiles: dict[str, ProfileConfig] = Field(default_factory=dict)
+    sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
 
     @model_validator(mode="after")
     def active_profile_exists(self) -> "PionConfig":

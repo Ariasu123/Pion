@@ -9,19 +9,29 @@ exit codes are reported in the result text, not raised.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from ..sandbox.base import (
+    HostSandboxRuntime,
+    SandboxError,
+    SandboxRuntime,
+    SandboxSettings,
+)
 from .base import AgentToolResult, OnUpdate
 
 MAX_OUTPUT_BYTES = 100 * 1024  # keep the last ~100KB of combined output
-_READ_CHUNK = 4096
 
 
 class BashArgs(BaseModel):
     command: str = Field(description="Bash command to execute")
-    timeout_s: int = Field(default=120, description="Timeout in seconds; the process is killed when exceeded")
+    timeout_s: int = Field(
+        default=120,
+        ge=1,
+        description="Timeout in seconds; the execution environment is restarted when exceeded",
+    )
 
 
 class BashTool:
@@ -34,6 +44,9 @@ class BashTool:
     Args = BashArgs
     execution_mode = "sequential"
 
+    def __init__(self, runtime: SandboxRuntime | None = None) -> None:
+        self.runtime = runtime
+
     @property
     def parameters(self) -> dict[str, Any]:
         return self.Args.model_json_schema()
@@ -45,80 +58,88 @@ class BashTool:
         abort: Optional[asyncio.Event] = None,
         on_update: Optional[OnUpdate] = None,
     ) -> AgentToolResult:
+        runtime = self.runtime
+        compatibility_mode = runtime is None
+        if runtime is None:
+            # ``BashTool()`` remains the historical, explicitly unsandboxed
+            # compatibility surface. The CLI always injects a runtime.
+            runtime = HostSandboxRuntime(
+                Path.cwd(), SandboxSettings(backend="off")
+            )
+
+        def details(
+            *,
+            exit_code: int | None,
+            truncated: bool,
+            timed_out: bool = False,
+            aborted: bool = False,
+        ) -> dict[str, object]:
+            result: dict[str, object] = {
+                "exitCode": exit_code,
+                "truncated": truncated,
+            }
+            if not compatibility_mode:
+                result = {
+                    **runtime.describe(),
+                    **result,
+                    "timedOut": timed_out,
+                    "aborted": aborted,
+                }
+            return result
+
         if abort is not None and abort.is_set():
-            return AgentToolResult.text("Error: operation aborted", details={"exitCode": None, "truncated": False})
+            return AgentToolResult.text(
+                "Error: operation aborted",
+                details=details(
+                    exit_code=None,
+                    truncated=False,
+                    aborted=True,
+                ),
+            )
 
         try:
-            proc = await asyncio.create_subprocess_shell(
+            result = await runtime.execute(
                 args.command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
+                timeout_s=args.timeout_s,
+                abort=abort,
+                on_update=(
+                    (
+                        lambda output: on_update(AgentToolResult.text(output))
+                    )
+                    if on_update is not None
+                    else None
+                ),
+                max_output_bytes=MAX_OUTPUT_BYTES,
             )
-        except OSError as exc:
+        except SandboxError as exc:
             return AgentToolResult.text(
-                f"Error: could not start command: {exc}",
-                details={"exitCode": None, "truncated": False},
+                f"Error: sandbox command failed: {exc}",
+                details=details(exit_code=None, truncated=False),
             )
 
-        buffer = bytearray()
-        truncated = False
-
-        async def pump() -> None:
-            nonlocal truncated
-            assert proc.stdout is not None
-            while True:
-                chunk = await proc.stdout.read(_READ_CHUNK)
-                if not chunk:
-                    break
-                buffer.extend(chunk)
-                if len(buffer) > MAX_OUTPUT_BYTES:
-                    # Keep the tail: the most recent output is what matters.
-                    del buffer[: len(buffer) - MAX_OUTPUT_BYTES]
-                    truncated = True
-                if on_update is not None:
-                    on_update(AgentToolResult.text(buffer.decode("utf-8", errors="replace")))
-
-        pump_task = asyncio.create_task(pump())
-        wait_task = asyncio.create_task(proc.wait())
-        abort_task = asyncio.create_task(abort.wait()) if abort is not None else None
-
-        wait_set: set[asyncio.Task] = {wait_task}
-        if abort_task is not None:
-            wait_set.add(abort_task)
-
-        done, pending = await asyncio.wait(
-            wait_set, timeout=args.timeout_s, return_when=asyncio.FIRST_COMPLETED
-        )
-
-        timed_out = not done
-        aborted = abort_task is not None and abort_task in done and not timed_out
-
-        if timed_out or aborted:
-            proc.kill()
-        for task in pending:
-            task.cancel()
-        # Drain remaining output after a kill so partial output is preserved.
-        await asyncio.gather(wait_task, pump_task, return_exceptions=True)
-        if abort_task is not None:
-            abort_task.cancel()
-
-        output = buffer.decode("utf-8", errors="replace")
-        if truncated:
+        output = result.output
+        if result.truncated:
             output = f"[output truncated: showing last ~{MAX_OUTPUT_BYTES // 1024}KB]\n\n{output}"
 
-        if aborted:
+        result_details = details(
+            exit_code=result.exit_code,
+            truncated=result.truncated,
+            timed_out=result.timed_out,
+            aborted=result.aborted,
+        )
+        if result.aborted:
             text = f"Command aborted.\n\n{output}" if output else "Command aborted."
-            return AgentToolResult.text(text, details={"exitCode": None, "truncated": truncated})
-        if timed_out:
+            return AgentToolResult.text(text, details=result_details)
+        if result.timed_out:
             note = f"Error: command timed out after {args.timeout_s}s and was killed."
             text = f"{note}\n\n{output}" if output else note
-            return AgentToolResult.text(text, details={"exitCode": None, "truncated": truncated})
+            return AgentToolResult.text(text, details=result_details)
 
-        exit_code = proc.returncode
+        exit_code = result.exit_code
         text = output
         if exit_code != 0:
             note = f"[exit code {exit_code}]"
             text = f"{text}\n\n{note}" if text else note
         if not text:
             text = "(no output)"
-        return AgentToolResult.text(text, details={"exitCode": exit_code, "truncated": truncated})
+        return AgentToolResult.text(text, details=result_details)

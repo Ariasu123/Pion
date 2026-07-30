@@ -10,6 +10,7 @@ from datetime import datetime
 import re
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from pion import __version__
@@ -28,6 +29,7 @@ from pion.cli import (
 from pion.llm.registry import get_model
 from pion.llm.types import AssistantMessage, Model, TextContent, UserMessage
 from pion.session import SessionManager
+from pion.sandbox import SandboxSettings, SandboxUnavailableError, WorkspaceGuard
 
 runner = CliRunner()
 
@@ -58,6 +60,7 @@ def test_help_exits_zero_and_mentions_model() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "--model" in strip_ansi(result.output)
+    assert "--sandbox" in strip_ansi(result.output)
 
 
 def test_version_prints_version() -> None:
@@ -297,6 +300,168 @@ def test_malformed_config_reports_error_without_starting(
     assert result.exit_code == 1
     assert "could not load" in result.output
     assert path.read_text(encoding="utf-8") == "{broken"
+
+
+def test_cli_sandbox_overrides_persisted_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    save_config(
+        PionConfig(
+            sandbox=SandboxSettings(
+                backend="off",
+                network="none",
+                image="configured:image",
+                git_write=False,
+            )
+        ),
+        cli.default_config_path(),
+    )
+    captured = {}
+
+    async def capture(*args, **kwargs) -> None:
+        captured["settings"] = args[5]
+        captured["allow_project_extensions"] = args[6]
+
+    monkeypatch.setattr(cli, "_async_main", capture)
+    result = runner.invoke(
+        app,
+        [
+            "--api-key",
+            "test-key",
+            "--sandbox",
+            "docker",
+            "--sandbox-image",
+            "cli:image",
+            "--sandbox-network",
+            "bridge",
+            "--sandbox-git-write",
+            "--allow-project-extensions",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    settings = captured["settings"]
+    assert settings.backend == "docker"
+    assert settings.image == "cli:image"
+    assert settings.network == "bridge"
+    assert settings.git_write is True
+    assert captured["allow_project_extensions"] is True
+
+
+def test_invalid_sandbox_cli_value_fails_before_starting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_async_main", pytest.fail)
+    result = runner.invoke(
+        app,
+        ["--api-key", "test-key", "--sandbox", "unsafe-host"],
+    )
+    assert result.exit_code == 1
+    assert "--sandbox must be" in result.output
+
+
+def test_sandbox_off_prints_high_visibility_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_async_main", _noop_async_main)
+    result = runner.invoke(
+        app,
+        ["--api-key", "test-key", "--sandbox", "off"],
+    )
+    assert result.exit_code == 0
+    assert "SANDBOX DISABLED" in strip_ansi(result.output)
+
+
+class _FakeStartupRuntime:
+    backend = "docker"
+
+    def __init__(self, workspace, *, start_error=None):
+        self.workspace = workspace
+        self.guard = WorkspaceGuard(workspace)
+        self.start_error = start_error
+        self.started = False
+        self.closed = False
+
+    async def start(self):
+        self.started = True
+        if self.start_error is not None:
+            raise self.start_error
+
+    async def close(self):
+        self.closed = True
+
+    def describe(self):
+        return {"backend": "docker", "containerId": "fake"}
+
+
+async def test_async_startup_fails_closed_before_session_or_agent(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _FakeStartupRuntime(
+        tmp_path,
+        start_error=SandboxUnavailableError("daemon unavailable"),
+    )
+    monkeypatch.setattr(cli, "build_runtime", lambda settings, workspace: runtime)
+    session_path = tmp_path / "sessions" / "must-not-exist.jsonl"
+
+    with pytest.raises(typer.Exit) as exc_info:
+        await cli._async_main(
+            get_model("deepseek-v4-flash"),
+            "key",
+            session_path,
+            True,
+            "prompt",
+            SandboxSettings(),
+            False,
+        )
+
+    assert exc_info.value.exit_code == 1
+    assert runtime.started
+    assert runtime.closed
+    assert not session_path.parent.exists()
+
+
+@pytest.mark.parametrize(
+    ("allow_project_extensions", "expected_include_project"),
+    [(False, False), (True, True)],
+)
+async def test_sandbox_controls_project_extension_search(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    allow_project_extensions: bool,
+    expected_include_project: bool,
+) -> None:
+    runtime = _FakeStartupRuntime(tmp_path)
+    seen = []
+
+    def capture_extension_dirs(include_project=True):
+        seen.append(include_project)
+        return []
+
+    class NoopRepl:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run_print(self, text):
+            return None
+
+    monkeypatch.setattr(cli, "build_runtime", lambda settings, workspace: runtime)
+    monkeypatch.setattr(cli, "extension_dirs", capture_extension_dirs)
+    monkeypatch.setattr(cli, "Repl", NoopRepl)
+
+    await cli._async_main(
+        get_model("deepseek-v4-flash"),
+        "key",
+        tmp_path / f"{allow_project_extensions}.jsonl",
+        False,
+        "prompt",
+        SandboxSettings(network="none"),
+        allow_project_extensions,
+    )
+
+    assert seen == [expected_include_project]
+    assert runtime.closed
 
 
 # ---------------------------------------------------------------------------

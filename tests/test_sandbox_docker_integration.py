@@ -58,7 +58,7 @@ async def test_workspace_visibility_secrets_and_interrupt_recycling(
         original_id = runtime.container_id
         updates = []
         write = await runtime.execute(
-            "printf sandbox-write > generated.txt",
+            "printf sandbox-write | tee generated.txt",
             timeout_s=10,
             abort=None,
             on_update=updates.append,
@@ -66,7 +66,7 @@ async def test_workspace_visibility_secrets_and_interrupt_recycling(
         )
         assert write.exit_code == 0
         assert (workspace / "generated.txt").read_text() == "sandbox-write"
-        assert updates
+        assert any("sandbox-write" in update for update in updates)
 
         isolation = await runtime.execute(
             f"cat {outside}; cat .env; env; test ! -S /var/run/docker.sock",

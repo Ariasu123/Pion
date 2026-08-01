@@ -27,10 +27,22 @@ class AgentToolResult:
     content: list[TextContent | ImageContent] = field(default_factory=list)
     details: Any = None
     terminate: bool = False  # hint: stop the agent loop after this batch
+    is_error: bool = False
 
     @classmethod
-    def text(cls, text: str, details: Any = None, terminate: bool = False) -> "AgentToolResult":
-        return cls(content=[TextContent(text=text)], details=details, terminate=terminate)
+    def text(
+        cls,
+        text: str,
+        details: Any = None,
+        terminate: bool = False,
+        is_error: bool = False,
+    ) -> "AgentToolResult":
+        return cls(
+            content=[TextContent(text=text)],
+            details=details,
+            terminate=terminate,
+            is_error=is_error,
+        )
 
 
 @dataclass

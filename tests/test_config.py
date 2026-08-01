@@ -7,7 +7,14 @@ import stat
 
 import pytest
 
-from pion.config import ConfigError, PionConfig, ProfileConfig, load_config, save_config
+from pion.config import (
+    ConfigError,
+    MCPServerConfig,
+    PionConfig,
+    ProfileConfig,
+    load_config,
+    save_config,
+)
 from pion.sandbox import SandboxSettings
 
 
@@ -25,6 +32,72 @@ def test_load_missing_config_returns_empty(tmp_path) -> None:
     assert config.profiles == {}
     assert config.active_profile is None
     assert config.sandbox == SandboxSettings()
+    assert config.mcp_servers == {}
+
+
+def test_v1_config_accepts_and_round_trips_mcp_servers(tmp_path) -> None:
+    path = tmp_path / "config.json"
+    config = PionConfig(
+        mcp_servers={
+            "filesystem": MCPServerConfig(
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+                env={"LOG_LEVEL": "warning"},
+                timeout_seconds=15,
+            )
+        }
+    )
+    save_config(config, path)
+    assert load_config(path).mcp_servers == config.mcp_servers
+
+
+@pytest.mark.parametrize("name", ["", "has space", "unicode-服务", "slash/name"])
+def test_config_rejects_unsafe_mcp_server_names(tmp_path, name: str) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "profiles": {},
+                "mcp_servers": {name: {"command": "server"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="MCP server names"):
+        load_config(path)
+
+
+def test_config_rejects_non_positive_mcp_timeout(tmp_path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "profiles": {},
+                "mcp_servers": {"demo": {"command": "server", "timeout_seconds": 0}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="timeout_seconds"):
+        load_config(path)
+
+
+def test_config_rejects_blank_mcp_command(tmp_path) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "profiles": {},
+                "mcp_servers": {"demo": {"command": "   "}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="MCP command cannot be blank"):
+        load_config(path)
 
 
 def test_v1_config_accepts_and_round_trips_sandbox_settings(tmp_path) -> None:

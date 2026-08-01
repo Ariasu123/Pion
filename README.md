@@ -14,6 +14,48 @@
 
 Pion is a lightweight, extensible Python coding-agent project inspired by the open-source pi agent; it currently provides a foundation for agent loops, LLM providers, tools, sessions, and hooks, and will evolve through further experimentation and extensions.
 
+## MCP servers
+
+Pion includes a built-in [Model Context Protocol](https://modelcontextprotocol.io/)
+client for stdio servers. Enabled servers are started with Pion, their tools
+are discovered automatically, and each tool is exposed to the model as
+`<server-name>__<tool-name>`. A server that fails to start is reported and
+disabled for that run without preventing Pion or other servers from starting.
+
+Add servers to `~/.pion/config.json`:
+
+```json
+{
+  "version": 1,
+  "mcp_servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/absolute/path/to/project"
+      ],
+      "env": {},
+      "enabled": true,
+      "timeout_seconds": 30
+    }
+  },
+  "active_profile": null,
+  "profiles": {}
+}
+```
+
+`env` overrides variables only for that child process; other host environment
+variables are inherited. Environment values are redacted from Pion's MCP
+startup and shutdown errors. The timeout applies to connection setup,
+discovery, and tool calls.
+
+MCP stdio servers are trusted host processes. They are **not** run inside
+Pion's Docker sandbox and may access resources available to the Pion process.
+Only configure servers and commands you trust. This first release supports MCP
+tools over stdio; MCP resources, prompts, and Streamable HTTP are not yet
+exposed.
+
 ## Docker sandbox
 
 Pion runs its default shell and file tools with a Docker sandbox. Docker is

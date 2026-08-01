@@ -14,6 +14,44 @@
 
 Pion 是一个受开源项目 pi agent 启发的轻量、可扩展 Python 编码智能体项目；当前为 agent 循环、LLM 提供商、工具、会话和钩子提供基础能力，后续将在此基础上持续进行实验与扩展。
 
+## MCP 服务
+
+Pion 内置了基于 stdio 的 [Model Context Protocol](https://modelcontextprotocol.io/)
+客户端。启用的服务会随 Pion 启动，工具会被自动发现，并以
+`<服务名>__<工具名>` 的名称提供给模型。某个服务启动失败时，Pion 会报告并在本次
+运行中禁用它，但不会阻止 Pion 或其他 MCP 服务继续启动。
+
+在 `~/.pion/config.json` 中添加服务：
+
+```json
+{
+  "version": 1,
+  "mcp_servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/项目的绝对路径"
+      ],
+      "env": {},
+      "enabled": true,
+      "timeout_seconds": 30
+    }
+  },
+  "active_profile": null,
+  "profiles": {}
+}
+```
+
+`env` 只覆盖该子进程中的同名变量，其余宿主环境变量会被继承。Pion 在 MCP
+启动和关闭错误中会隐藏已配置的环境变量值。超时时间同时用于连接、工具发现和工具
+调用。
+
+stdio MCP 服务是受信任的宿主进程，**不会**在 Pion 的 Docker 沙盒中运行，能够访问
+Pion 进程可访问的宿主资源。请只配置你信任的服务和命令。首版仅支持通过 stdio
+使用 MCP tools，暂不提供 resources、prompts 和 Streamable HTTP。
+
 ## Docker 沙盒
 
 Pion 默认使用 Docker 沙盒运行 shell 和文件工具。Docker 采用失败关闭策略：

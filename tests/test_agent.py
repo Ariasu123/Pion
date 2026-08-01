@@ -206,6 +206,24 @@ async def test_two_round_tool_cycle():
     assert [t.name for t in calls[0]["context"].tools] == ["echo"]
 
 
+async def test_tool_can_return_an_explicit_error_result():
+    class ErrorResultTool(EchoTool):
+        async def execute(self, tool_call_id, args, abort=None, on_update=None):
+            return AgentToolResult.text("remote error", is_error=True)
+
+    agent, _, _ = make_agent(
+        [
+            {"tool_calls": [tool_call("echo", {"text": "x"})]},
+            {"text": "handled"},
+        ],
+        tools=[ErrorResultTool()],
+    )
+    await agent.prompt("go")
+    result = tool_results_of(agent)[0]
+    assert result.is_error
+    assert result.text() == "remote error"
+
+
 async def test_events_sequence_sanity_tool_cycle():
     echo = EchoTool()
     agent, _, events = make_agent(

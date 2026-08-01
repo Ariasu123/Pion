@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .llm.types import Model
 from .sandbox.base import SandboxSettings
@@ -44,6 +44,25 @@ class ProfileConfig(BaseModel):
         )
 
 
+class MCPServerConfig(BaseModel):
+    """One trusted host-side stdio MCP server."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command: str = Field(min_length=1)
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+    timeout_seconds: float = Field(default=30.0, gt=0)
+
+    @field_validator("command")
+    @classmethod
+    def command_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("MCP command cannot be blank")
+        return value
+
+
 class PionConfig(BaseModel):
     """Versioned collection of named connection profiles."""
 
@@ -53,12 +72,27 @@ class PionConfig(BaseModel):
     active_profile: str | None = None
     profiles: dict[str, ProfileConfig] = Field(default_factory=dict)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
+    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def active_profile_exists(self) -> "PionConfig":
         if self.active_profile is not None and self.active_profile not in self.profiles:
             raise ValueError(
                 f"active profile {self.active_profile!r} is not present in profiles"
+            )
+        invalid = [
+            name
+            for name in self.mcp_servers
+            if not name
+            or any(
+                not (char.isascii() and (char.isalnum() or char in "_-"))
+                for char in name
+            )
+        ]
+        if invalid:
+            raise ValueError(
+                "MCP server names may contain only ASCII letters, digits, '_' and '-': "
+                + ", ".join(repr(name) for name in invalid)
             )
         return self
 

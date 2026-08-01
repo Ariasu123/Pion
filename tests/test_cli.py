@@ -14,7 +14,7 @@ import typer
 from typer.testing import CliRunner
 
 from pion import __version__
-from pion.config import PionConfig, ProfileConfig, load_config, save_config
+from pion.config import MCPServerConfig, PionConfig, ProfileConfig, load_config, save_config
 import pion.cli as cli
 from pion.cli import (
     app,
@@ -461,6 +461,55 @@ async def test_sandbox_controls_project_extension_search(
     )
 
     assert seen == [expected_include_project]
+    assert runtime.closed
+
+
+async def test_async_startup_connects_and_closes_configured_mcp(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _FakeStartupRuntime(tmp_path)
+    seen = {}
+
+    class FakeMCPManager:
+        def __init__(self, servers):
+            seen["servers"] = servers
+            self.tools = []
+            self.errors = ["broken: unavailable"]
+            self.connected_server_count = 1
+
+        async def start(self, reserved):
+            seen["reserved"] = reserved
+
+        async def close(self):
+            seen["closed"] = True
+
+    class NoopRepl:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run_print(self, text):
+            return None
+
+    servers = {"demo": MCPServerConfig(command="demo-server")}
+    monkeypatch.setattr(cli, "build_runtime", lambda settings, workspace: runtime)
+    monkeypatch.setattr(cli, "MCPClientManager", FakeMCPManager)
+    monkeypatch.setattr(cli, "Repl", NoopRepl)
+
+    await cli._async_main(
+        get_model("deepseek-v4-flash"),
+        "key",
+        tmp_path / "mcp-session.jsonl",
+        True,
+        "prompt",
+        SandboxSettings(network="none"),
+        False,
+        servers,
+    )
+
+    assert seen["servers"] == servers
+    assert {"read", "write", "edit", "bash"} <= seen["reserved"]
+    assert seen["closed"]
     assert runtime.closed
 
 

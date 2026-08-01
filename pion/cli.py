@@ -28,6 +28,7 @@ from .agent.agent import Agent
 from .agent.events import AgentEvent
 from .config import (
     ConfigError,
+    MCPServerConfig,
     PionConfig,
     ProfileConfig,
     default_config_path,
@@ -35,6 +36,7 @@ from .config import (
     save_config,
 )
 from .hooks import ExtensionManager
+from .mcp import MCPClientManager
 from .llm.registry import ENV_KEY_NAMES, get_model, resolve_api_key
 from .llm.types import (
     AssistantMessage,
@@ -733,8 +735,10 @@ async def _async_main(
     print_prompt: Optional[str],
     sandbox_settings: SandboxSettings,
     allow_project_extensions: bool,
+    mcp_servers: Optional[dict[str, MCPServerConfig]] = None,
 ) -> None:
     runtime = build_runtime(sandbox_settings, Path.cwd())
+    mcp_manager: Optional[MCPClientManager] = None
     try:
         try:
             # Fail before constructing the Agent or issuing any model request.
@@ -783,6 +787,32 @@ async def _async_main(
                     f"[dim yellow]Extension error: {error}[/dim yellow]"
                 )
 
+        enabled_mcp = {
+            name: server
+            for name, server in (mcp_servers or {}).items()
+            if server.enabled
+        }
+        if enabled_mcp:
+            err_console.print(
+                "[bold yellow]MCP security notice:[/bold yellow] stdio MCP servers "
+                "run as trusted host processes and are not isolated by the Docker sandbox.",
+                soft_wrap=True,
+            )
+            mcp_manager = MCPClientManager(mcp_servers or {})
+            default_tools = build_default_tools(runtime)
+            reserved_names = {tool.name for tool in default_tools}
+            if extensions is not None:
+                reserved_names.update(tool.name for tool in extensions.tools)
+            await mcp_manager.start(reserved_names)
+            for error in mcp_manager.errors:
+                err_console.print(f"[yellow]MCP server unavailable:[/yellow] {escape(error)}")
+            err_console.print(
+                f"[dim]MCP: {mcp_manager.connected_server_count} server(s), "
+                f"{len(mcp_manager.tools)} tool(s) connected.[/dim]"
+            )
+        else:
+            default_tools = build_default_tools(runtime)
+
         # Session: resume an existing JSONL file, or start a new one.
         if session_path is not None and session_path.exists():
             try:
@@ -800,7 +830,7 @@ async def _async_main(
 
         agent = Agent(
             model=model,
-            tools=build_default_tools(runtime),
+            tools=[*default_tools, *(mcp_manager.tools if mcp_manager is not None else [])],
             system_prompt=build_system_prompt(Path.cwd()),
             api_key=api_key,
             extension_manager=extensions,
@@ -813,6 +843,11 @@ async def _async_main(
         else:
             await repl.run()
     finally:
+        if mcp_manager is not None:
+            prior_errors = len(mcp_manager.errors)
+            await mcp_manager.close()
+            for error in mcp_manager.errors[prior_errors:]:
+                err_console.print(f"[dim yellow]MCP shutdown error: {escape(error)}[/dim yellow]")
         await runtime.close()
 
 
@@ -917,6 +952,7 @@ def main(
                 print_prompt,
                 sandbox_settings,
                 allow_project_extensions,
+                config.mcp_servers,
             )
         )
     except KeyboardInterrupt:

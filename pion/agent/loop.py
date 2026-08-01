@@ -704,7 +704,7 @@ async def _execute_prepared_tool_call(
         accepting_updates = False
         if update_tasks:
             await asyncio.gather(*update_tasks)
-        return result, False
+        return result, result.is_error
     except Exception as exc:
         accepting_updates = False
         if update_tasks:
@@ -750,6 +750,7 @@ async def _finalize_executed_tool_call(
                         if _field(override, "terminate") is not None
                         else result.terminate
                     ),
+                    is_error=result.is_error,
                 )
                 override_error = _field(override, "is_error", "isError")
                 if override_error is not None:

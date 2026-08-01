@@ -81,6 +81,18 @@ def test_append_and_persistence_round_trip(tmp_path: Path) -> None:
     assert len(path.read_text(encoding="utf-8").strip().split("\n")) == 5
 
 
+def test_compaction_summary_timestamp_is_stable() -> None:
+    manager = SessionManager()
+    manager.append_message(_user("before"))
+    compaction_id = manager.append_compaction("stable summary")
+
+    first = manager.build_context()[0]
+    second = manager.build_context()[0]
+
+    assert first.timestamp == manager.get_entry(compaction_id).timestamp
+    assert second.timestamp == first.timestamp
+
+
 def test_in_memory_session_writes_nothing(tmp_path: Path) -> None:
     manager = SessionManager()
     manager.append_message(_user("hello"))

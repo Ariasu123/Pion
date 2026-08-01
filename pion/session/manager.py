@@ -227,7 +227,15 @@ class SessionManager:
                 selected.append(entry)
         selected.extend(path[compaction_idx + 1 :])
 
-        messages: list[Message] = [UserMessage(content=compaction.summary or "")]
+        # The summary is a deterministic projection of the persisted
+        # compaction entry. Reusing its timestamp prevents repeated context
+        # builds (and reloads) from producing different message snapshots.
+        messages: list[Message] = [
+            UserMessage(
+                content=compaction.summary or "",
+                timestamp=compaction.timestamp,
+            )
+        ]
         messages.extend(
             entry.message
             for entry in selected

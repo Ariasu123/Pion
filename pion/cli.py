@@ -1,10 +1,9 @@
 """pion command line interface.
 
-`pion` starts an interactive REPL (streaming, tool-call summaries, slash
-commands); `pion --print "..."` runs a single prompt and exits. Sessions
-persist as JSONL under ~/.pion/sessions (or a file passed via --session),
-with automatic context compaction when the conversation approaches the
-model's context window.
+`pion` starts the full-screen Textual UI, `pion --ui plain` starts the legacy
+REPL, and `pion --print "..."` runs a single prompt and exits. Sessions persist
+as JSONL under ~/.pion/sessions (or a file passed via --session), with automatic
+context compaction when the conversation approaches the model's context window.
 """
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import signal
 import sys
 import uuid
@@ -35,23 +35,22 @@ from .config import (
     load_config,
     save_config,
 )
+from .controller import AgentSessionController
 from .hooks import ExtensionManager
-from .mcp import MCPClientManager
 from .llm.registry import ENV_KEY_NAMES, get_model, resolve_api_key
 from .llm.types import (
     AssistantMessage,
-    Message,
     Model,
     TextContent,
-    Usage,
     UserMessage,
 )
-from .session import SessionManager, compact, estimate_tokens, should_compact
+from .mcp import MCPClientManager
 from .sandbox import (
     SandboxError,
     SandboxSettings,
     build_runtime,
 )
+from .session import SessionManager, estimate_tokens, should_compact
 from .tools import build_default_tools
 
 app = typer.Typer(
@@ -127,6 +126,23 @@ def is_interactive() -> bool:
     return sys.stdin.isatty()
 
 
+def resolve_ui_mode(ui: str, print_prompt: str | None) -> str:
+    """Validate UI selection and enforce terminal requirements."""
+    mode = ui.strip().lower()
+    if mode not in ("tui", "plain"):
+        raise ConfigError("--ui must be 'tui' or 'plain'")
+    if print_prompt is None and not is_interactive():
+        raise ConfigError(
+            "interactive mode requires a TTY; use --print for non-interactive input"
+        )
+    if print_prompt is None and mode == "tui" and os.environ.get("TERM") == "dumb":
+        err_console.print(
+            "[yellow]Terminal does not support full-screen UI; using --ui plain.[/yellow]"
+        )
+        return "plain"
+    return mode
+
+
 def _prompt_nonempty(label: str, default: str | None = None) -> str:
     """Prompt until a non-empty value is entered."""
     while True:
@@ -142,9 +158,11 @@ def _prompt_protocol(existing: ProfileConfig | None = None) -> str:
         "anthropic" if existing and existing.api == "anthropic-messages" else "openai"
     )
     while True:
-        value = typer.prompt(
-            "API protocol (openai/anthropic)", default=default
-        ).strip().lower()
+        value = (
+            typer.prompt("API protocol (openai/anthropic)", default=default)
+            .strip()
+            .lower()
+        )
         aliases = {
             "openai": "openai-completions",
             "openai-completions": "openai-completions",
@@ -486,18 +504,15 @@ class Repl:
 
     def __init__(
         self,
-        agent: Agent,
-        session: SessionManager,
-        session_path: Path,
-        extensions: Optional[ExtensionManager],
+        controller: AgentSessionController,
         out: Console,
     ) -> None:
-        self.agent = agent
-        self.session = session
-        self.session_path = session_path
-        self.extensions = extensions
+        self.controller = controller
+        self.agent = controller.agent
+        self.session = controller.session
+        self.session_path = controller.session_path
+        self.extensions = controller.extensions
         self.console = out
-        self.last_usage: Optional[Usage] = None
 
     # ------------------------------------------------------------------
     # Running prompts
@@ -508,14 +523,14 @@ class Repl:
         loop = asyncio.get_running_loop()
         installed = False
         try:
-            loop.add_signal_handler(signal.SIGINT, self.agent.abort)
+            loop.add_signal_handler(signal.SIGINT, self.controller.abort)
             installed = True
         except (NotImplementedError, RuntimeError, ValueError):
             # Platform without signal handlers (or not the main thread):
             # Ctrl-C falls back to interrupting the whole process.
             installed = False
         try:
-            return await self.agent.prompt(text)
+            return await self.controller.prompt(text)
         finally:
             if installed:
                 loop.remove_signal_handler(signal.SIGINT)
@@ -525,17 +540,11 @@ class Repl:
         renderer = StreamRenderer(self.console) if render else None
         if renderer is not None:
             self.agent.subscribe(renderer.handle)
-        before = len(self.agent.messages)
         try:
             final = await self._prompt_with_sigint(text)
         finally:
             if renderer is not None:
                 self.agent.unsubscribe(renderer.handle)
-        self.last_usage = final.usage
-
-        for message in self.agent.messages[before:]:
-            self.session.append_message(message)
-
         if render:
             if final.stop_reason == "error":
                 self.console.print(
@@ -544,7 +553,6 @@ class Repl:
             elif final.stop_reason == "aborted":
                 self.console.print("[dim]Aborted.[/dim]")
 
-        await self.maybe_compact()
         return final
 
     async def maybe_compact(self, force: bool = False) -> None:
@@ -559,27 +567,9 @@ class Repl:
         if not force and not should_compact(self.agent.messages, self.agent.model):
             return
         try:
-            if self.extensions is not None:
-                await self.extensions.notify(
-                    "session_before_compact",
-                    {
-                        "session_path": str(self.session_path),
-                        "message_count": len(self.agent.messages),
-                    },
-                )
-            # Compute the kept tail before compact() appends its own entry.
-            kept_id = find_first_kept_entry_id(self.session, self.agent.model)
-            summary = await compact(
-                self.session,
-                self.agent.messages,
-                self.agent.model,
-                self.agent.stream_fn,
-                self.agent.api_key,
-            )
-            # The newest compaction entry wins in build_context, so this one
-            # (with the proper kept-entry id) overrides compact()'s entry.
-            self.session.append_compaction(summary, first_kept_entry_id=kept_id)
-            self.agent.messages = self.session.build_context()
+            summary = await self.controller.maybe_compact(force=force)
+            if summary is None:
+                return
             self.console.print(
                 f"[dim]Context compacted — summary of {len(summary)} chars, "
                 f"{len(self.agent.messages)} messages kept in context.[/dim]"
@@ -598,7 +588,10 @@ class Repl:
         self.console.print("[bold]Commands[/bold]")
         rows = [
             ("/help", "show this help"),
-            ("/model <id>", "switch model (re-resolves the API key); no arg shows current"),
+            (
+                "/model <id>",
+                "switch model (re-resolves the API key); no arg shows current",
+            ),
             ("/compact", "force context compaction now"),
             ("/stats", "token usage and cost of the last response"),
             ("/exit", "quit (also Ctrl-D / EOF)"),
@@ -611,7 +604,7 @@ class Repl:
                 self.console.print(f"  [cyan]/{name}[/cyan]")
 
     def _print_stats(self) -> None:
-        usage = self.last_usage
+        usage = self.controller.last_usage
         if usage is None:
             self.console.print("[dim]No usage yet — run a prompt first.[/dim]")
             return
@@ -629,12 +622,11 @@ class Repl:
             self.console.print(f"[dim]Current model: {self.agent.model.id}[/dim]")
             return
         try:
-            model = get_model(model_id)
+            self.controller.switch_model(model_id)
         except KeyError as exc:
             self.console.print(f"[red]{escape(str(exc.args[0]))}[/red]")
             return
-        self.agent.model = model
-        self.agent.api_key = resolve_api_key(model)
+        model = self.agent.model
         self.console.print(f"[dim]Switched to {model.id} ({model.name}).[/dim]")
         if self.agent.api_key is None:
             self.console.print(
@@ -662,7 +654,9 @@ class Repl:
             if result is not None:
                 self.console.print(str(result))
         else:
-            self.console.print(f"[red]Unknown command: /{escape(name)}[/red] — try /help")
+            self.console.print(
+                f"[red]Unknown command: /{escape(name)}[/red] — try /help"
+            )
         return False
 
     # ------------------------------------------------------------------
@@ -736,6 +730,7 @@ async def _async_main(
     sandbox_settings: SandboxSettings,
     allow_project_extensions: bool,
     mcp_servers: Optional[dict[str, MCPServerConfig]] = None,
+    ui_mode: str = "plain",
 ) -> None:
     runtime = build_runtime(sandbox_settings, Path.cwd())
     mcp_manager: Optional[MCPClientManager] = None
@@ -750,7 +745,10 @@ async def _async_main(
             )
             raise typer.Exit(1) from exc
 
-        if sandbox_settings.backend == "docker" and sandbox_settings.network == "bridge":
+        if (
+            sandbox_settings.backend == "docker"
+            and sandbox_settings.network == "bridge"
+        ):
             err_console.print(
                 "[yellow]Sandbox notice:[/yellow] Docker bridge networking is enabled; "
                 "it does not prevent source exfiltration. Use "
@@ -766,10 +764,7 @@ async def _async_main(
             include_project = (
                 sandbox_settings.backend == "off" or allow_project_extensions
             )
-            if (
-                sandbox_settings.backend != "off"
-                and allow_project_extensions
-            ):
+            if sandbox_settings.backend != "off" and allow_project_extensions:
                 err_console.print(
                     "[bold yellow]WARNING:[/bold yellow] project extensions execute "
                     "as trusted Python in the host Pion process and can bypass the sandbox.",
@@ -783,9 +778,7 @@ async def _async_main(
             if dirs:
                 await extensions.load(dirs)
             for error in extensions.errors:
-                err_console.print(
-                    f"[dim yellow]Extension error: {error}[/dim yellow]"
-                )
+                err_console.print(f"[dim yellow]Extension error: {error}[/dim yellow]")
 
         enabled_mcp = {
             name: server
@@ -805,7 +798,9 @@ async def _async_main(
                 reserved_names.update(tool.name for tool in extensions.tools)
             await mcp_manager.start(reserved_names)
             for error in mcp_manager.errors:
-                err_console.print(f"[yellow]MCP server unavailable:[/yellow] {escape(error)}")
+                err_console.print(
+                    f"[yellow]MCP server unavailable:[/yellow] {escape(error)}"
+                )
             err_console.print(
                 f"[dim]MCP: {mcp_manager.connected_server_count} server(s), "
                 f"{len(mcp_manager.tools)} tool(s) connected.[/dim]"
@@ -830,16 +825,37 @@ async def _async_main(
 
         agent = Agent(
             model=model,
-            tools=[*default_tools, *(mcp_manager.tools if mcp_manager is not None else [])],
+            tools=[
+                *default_tools,
+                *(mcp_manager.tools if mcp_manager is not None else []),
+            ],
             system_prompt=build_system_prompt(Path.cwd()),
             api_key=api_key,
             extension_manager=extensions,
         )
         agent.messages = session.build_context()
 
-        repl = Repl(agent, session, session_path, extensions, console)
+        controller = AgentSessionController(agent, session, session_path, extensions)
+        repl = Repl(controller, console)
         if print_prompt is not None:
             await repl.run_print(print_prompt)
+        elif ui_mode == "tui":
+            from .tui import PionApp, TUIStatus
+
+            tui = PionApp(
+                controller,
+                TUIStatus(
+                    project=Path.cwd().name,
+                    sandbox=sandbox_settings.backend,
+                    mcp_servers=(
+                        mcp_manager.connected_server_count
+                        if mcp_manager is not None
+                        else 0
+                    ),
+                    mcp_tools=len(mcp_manager.tools) if mcp_manager is not None else 0,
+                ),
+            )
+            await tui.run_async()
         else:
             await repl.run()
     finally:
@@ -847,7 +863,9 @@ async def _async_main(
             prior_errors = len(mcp_manager.errors)
             await mcp_manager.close()
             for error in mcp_manager.errors[prior_errors:]:
-                err_console.print(f"[dim yellow]MCP shutdown error: {escape(error)}[/dim yellow]")
+                err_console.print(
+                    f"[dim yellow]MCP shutdown error: {escape(error)}[/dim yellow]"
+                )
         await runtime.close()
 
 
@@ -857,7 +875,9 @@ def main(
         None, "--model", "-m", help="Model id (overrides and updates the profile)."
     ),
     api_key: Optional[str] = typer.Option(
-        None, "--api-key", help="API key (default: provider env var, e.g. DEEPSEEK_API_KEY)."
+        None,
+        "--api-key",
+        help="API key (default: provider env var, e.g. DEEPSEEK_API_KEY).",
     ),
     base_url: Optional[str] = typer.Option(
         None, "--base-url", help="Override the model's API base URL."
@@ -899,6 +919,11 @@ def main(
         "--allow-project-extensions",
         help="Load project Python extensions on the host even when sandboxed.",
     ),
+    ui: str = typer.Option(
+        "tui",
+        "--ui",
+        help="Interactive interface: tui (default) or plain.",
+    ),
     print_prompt: Optional[str] = typer.Option(
         None, "--print", "-p", help="Run a single prompt, print the reply, and exit."
     ),
@@ -911,7 +936,7 @@ def main(
         help="Print the version and exit.",
     ),
 ) -> None:
-    """pion: a minimal, hackable coding agent. No arguments starts the REPL."""
+    """pion: a minimal, hackable coding agent. No arguments starts the TUI."""
     try:
         config, _ = _load_user_config()
         sandbox_settings = resolve_sandbox_settings(
@@ -921,6 +946,9 @@ def main(
             network=sandbox_network,
             git_write=sandbox_git_write,
         )
+        # Validate terminal/UI requirements before profile resolution so a
+        # piped interactive launch reports the actionable TTY error directly.
+        ui_mode = resolve_ui_mode(ui, print_prompt)
         model, key = resolve_startup(
             model_id=model_id,
             api_key=api_key,
@@ -953,6 +981,7 @@ def main(
                 sandbox_settings,
                 allow_project_extensions,
                 config.mcp_servers,
+                ui_mode,
             )
         )
     except KeyboardInterrupt:

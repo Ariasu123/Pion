@@ -11,7 +11,7 @@ Python port of the essentials of pi's
   its ``first_kept_entry_id`` with a summary user message.
 
 Differences from pi:
-- Only three entry types exist here: "message", "compaction", "custom".
+- Pion supports message, compaction, custom, branch-summary, and label entries.
 - Entry timestamps are epoch milliseconds (int), matching pion's message
   timestamps; pi uses ISO strings for entry timestamps.
 """
@@ -21,12 +21,13 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Optional
 
 from pydantic import Field
 
-from ..llm.types import Message, PiModel, UserMessage, sanitize_message
+from ..llm.types import Message, PiModel, Usage, UserMessage, sanitize_message
 
 
 def _now_ms() -> int:
@@ -48,12 +49,26 @@ class SessionEntry(PiModel):
 
     id: str = Field(default_factory=_new_id)
     parent_id: Optional[str] = Field(default=None, alias="parentId")
-    type: Literal["message", "compaction", "custom"]
+    type: Literal["message", "compaction", "custom", "branch_summary", "label"]
     timestamp: int = Field(default_factory=_now_ms)
     message: Optional[Message] = None
     summary: Optional[str] = None
     first_kept_entry_id: Optional[str] = Field(default=None, alias="firstKeptEntryId")
     data: Optional[dict[str, Any]] = None
+    from_id: Optional[str] = Field(default=None, alias="fromId")
+    target_id: Optional[str] = Field(default=None, alias="targetId")
+    label: Optional[str] = None
+    usage: Optional[Usage] = None
+
+
+@dataclass(frozen=True)
+class SessionTreeNode:
+    """Read-only session tree node with its latest resolved label."""
+
+    entry: SessionEntry
+    children: tuple["SessionTreeNode", ...] = ()
+    label: str | None = None
+    label_timestamp: int | None = None
 
 
 class SessionManager:
@@ -69,6 +84,8 @@ class SessionManager:
         self._entries: dict[str, SessionEntry] = {}
         self._order: list[str] = []  # entry ids in insertion order
         self._leaf_id: str | None = None
+        self._labels_by_id: dict[str, str] = {}
+        self._label_timestamps_by_id: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Loading / persistence
@@ -94,6 +111,7 @@ class SessionManager:
                 manager._entries[entry.id] = entry
                 manager._order.append(entry.id)
                 manager._leaf_id = entry.id
+                manager._apply_label_entry(entry)
         return manager
 
     def _persist(self, entry: SessionEntry) -> None:
@@ -106,8 +124,19 @@ class SessionManager:
         self._entries[entry.id] = entry
         self._order.append(entry.id)
         self._leaf_id = entry.id
+        self._apply_label_entry(entry)
         self._persist(entry)
         return entry.id
+
+    def _apply_label_entry(self, entry: SessionEntry) -> None:
+        if entry.type != "label" or entry.target_id is None:
+            return
+        if entry.label:
+            self._labels_by_id[entry.target_id] = entry.label
+            self._label_timestamps_by_id[entry.target_id] = entry.timestamp
+        else:
+            self._labels_by_id.pop(entry.target_id, None)
+            self._label_timestamps_by_id.pop(entry.target_id, None)
 
     # ------------------------------------------------------------------
     # Appending (all return the new entry id)
@@ -142,6 +171,42 @@ class SessionManager:
             SessionEntry(type="custom", parentId=self._leaf_id, data=data)
         )
 
+    def append_label_change(self, target_id: str, label: str | None) -> str:
+        """Append a label update without rewriting the target entry."""
+        if target_id not in self._entries:
+            raise KeyError(f"unknown entry id: {target_id}")
+        normalized = label.strip() if label and label.strip() else None
+        return self._append(
+            SessionEntry(
+                type="label",
+                parentId=self._leaf_id,
+                targetId=target_id,
+                label=normalized,
+            )
+        )
+
+    def branch_with_summary(
+        self,
+        branch_from_id: str | None,
+        summary: str,
+        *,
+        from_id: str | None,
+        usage: Usage | None = None,
+    ) -> str:
+        """Atomically move to an earlier point and append a branch summary."""
+        if branch_from_id is not None and branch_from_id not in self._entries:
+            raise KeyError(f"unknown entry id: {branch_from_id}")
+        self._leaf_id = branch_from_id
+        return self._append(
+            SessionEntry(
+                type="branch_summary",
+                parentId=branch_from_id,
+                fromId=from_id,
+                summary=summary,
+                usage=usage,
+            )
+        )
+
     # ------------------------------------------------------------------
     # Tree navigation
     # ------------------------------------------------------------------
@@ -154,6 +219,15 @@ class SessionManager:
     def get_entry(self, entry_id: str) -> SessionEntry:
         """Look up an entry by id."""
         return self._entries[entry_id]
+
+    def get_entries(self) -> list[SessionEntry]:
+        """All entries in append order as defensive copies."""
+        return [
+            self._entries[entry_id].model_copy(deep=True) for entry_id in self._order
+        ]
+
+    def get_label(self, entry_id: str) -> str | None:
+        return self._labels_by_id.get(entry_id)
 
     def children(self, parent_id: str | None) -> list[SessionEntry]:
         """Direct children of `parent_id`, in insertion order."""
@@ -178,20 +252,75 @@ class SessionManager:
             raise KeyError(f"unknown entry id: {entry_id}")
         self._leaf_id = entry_id
 
-    # ------------------------------------------------------------------
-    # Context building
-    # ------------------------------------------------------------------
+    def branch(self, entry_id: str | None) -> None:
+        """Move the active leaf to an entry, or before the root with None."""
+        if entry_id is not None and entry_id not in self._entries:
+            raise KeyError(f"unknown entry id: {entry_id}")
+        self._leaf_id = entry_id
 
-    def _path_entries(self) -> list[SessionEntry]:
-        """Entries on the active branch, ordered root -> leaf."""
+    def reset_leaf(self) -> None:
+        self._leaf_id = None
+
+    def get_branch(self, from_id: str | None = None) -> list[SessionEntry]:
+        """Entries from root to ``from_id`` (the active leaf by default)."""
+        current = self._leaf_id if from_id is None else from_id
+        if current is not None and current not in self._entries:
+            raise KeyError(f"unknown entry id: {current}")
         chain: list[SessionEntry] = []
-        current = self._leaf_id
         while current is not None:
             entry = self._entries[current]
             chain.append(entry)
             current = entry.parent_id
         chain.reverse()
         return chain
+
+    def get_tree(self) -> tuple[SessionTreeNode, ...]:
+        """Return the full append-only session structure as immutable nodes."""
+        children: dict[str | None, list[str]] = {}
+        for entry_id in self._order:
+            entry = self._entries[entry_id]
+            parent = entry.parent_id if entry.parent_id in self._entries else None
+            children.setdefault(parent, []).append(entry_id)
+
+        def build(entry_id: str, ancestors: frozenset[str]) -> SessionTreeNode:
+            entry = self._entries[entry_id]
+            if entry_id in ancestors:  # defensive handling for corrupted files
+                child_nodes: tuple[SessionTreeNode, ...] = ()
+            else:
+                child_nodes = tuple(
+                    build(child_id, ancestors | {entry_id})
+                    for child_id in children.get(entry_id, [])
+                    if child_id != entry_id
+                )
+            return SessionTreeNode(
+                entry=entry.model_copy(deep=True),
+                children=child_nodes,
+                label=self._labels_by_id.get(entry_id),
+                label_timestamp=self._label_timestamps_by_id.get(entry_id),
+            )
+
+        return tuple(
+            build(entry_id, frozenset()) for entry_id in children.get(None, [])
+        )
+
+    # ------------------------------------------------------------------
+    # Context building
+    # ------------------------------------------------------------------
+
+    def _path_entries(self) -> list[SessionEntry]:
+        """Entries on the active branch, ordered root -> leaf."""
+        return self.get_branch()
+
+    @staticmethod
+    def _context_message(entry: SessionEntry) -> Message | None:
+        if entry.type == "message":
+            return entry.message
+        if entry.type == "branch_summary":
+            return UserMessage(
+                content=f"[Branch summary]\n{entry.summary or ''}",
+                timestamp=entry.timestamp,
+            )
+        return None
 
     def build_context(self) -> list[Message]:
         """Build the message list for the LLM along the active branch.
@@ -212,9 +341,7 @@ class SessionManager:
 
         if compaction_idx < 0:
             return [
-                entry.message
-                for entry in path
-                if entry.type == "message" and entry.message is not None
+                message for entry in path if (message := self._context_message(entry))
             ]
 
         compaction = path[compaction_idx]
@@ -237,8 +364,6 @@ class SessionManager:
             )
         ]
         messages.extend(
-            entry.message
-            for entry in selected
-            if entry.type == "message" and entry.message is not None
+            message for entry in selected if (message := self._context_message(entry))
         )
         return messages

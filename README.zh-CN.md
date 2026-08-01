@@ -14,6 +14,50 @@
 
 Pion 是一个受开源项目 pi agent 启发的轻量、可扩展 Python 编码智能体项目；当前为 agent 循环、LLM 提供商、工具、会话和钩子提供基础能力，后续将在此基础上持续进行实验与扩展。
 
+## 终端界面
+
+在交互式终端中运行 `pion`，现在会默认打开基于 Textual 的全屏界面。原有的逐行
+REPL 仍作为低能力终端和故障排查入口保留：
+
+```text
+pion                         # 全屏 TUI（默认）
+pion --ui tui                # 显式选择 TUI
+pion --ui plain              # 原有逐行 REPL
+pion --print "你的提示词"    # 单次执行后退出，行为不变
+pion --session path.jsonl    # 在 TUI 中恢复指定会话
+```
+
+交互模式必须运行在 TTY 中。在管道、CI 或其他非 TTY 环境中请使用 `--print`；Pion
+不会尝试绘制全屏界面。对于报告 `TERM=dumb` 的终端，Pion 会回退到 plain 界面。
+
+中央对话区支持 Markdown 流式更新，工具调用默认显示为折叠卡片。卡片会展示运行
+状态、耗时、参数摘要、输出或错误；MCP 工具还会显示来源服务。手动向上滚动后会
+暂停自动跟随，回到底部时恢复。
+
+常用键位：
+
+| 键位 | 操作 |
+| --- | --- |
+| `Enter` | 发送编辑器内容 |
+| `Ctrl+J` | 插入换行 |
+| `Esc` | 中断当前生成或分支摘要 |
+| `Ctrl+P` | 打开命令菜单 |
+| `Ctrl+B` | 切换或聚焦 session tree |
+| `Ctrl+Q` | 退出 Pion |
+| `Ctrl+O` | tree 聚焦时轮换过滤模式 |
+| `Shift+L` | 为选中的 tree entry 设置或清除标签 |
+
+终端宽度不小于 100 列时，session tree 常驻左侧；窄终端中通过覆盖层显示。过滤
+模式包括 `default`、`no-tools`、`user-only`、`labeled-only` 和 `all`。选择 user
+entry 会把 leaf 移到其 parent，并将旧提示词放回编辑器；选择 assistant、tool
+result、compaction 或 branch summary entry 会直接移动到该节点。若切换会放弃当前
+后缀，可以选择不总结、默认总结或提供自定义关注点。摘要生成是事务性的：失败或
+中断不会改变当前分支和 JSONL 文件。
+
+TUI 支持 `/help`、`/model`、`/compact`、`/stats`、`/tree`、`/exit` 以及 extension
+注册的命令。v1 可以选择模型；sandbox、MCP 和 profile 仅展示状态，仍通过 CLI 或
+`~/.pion/config.json` 编辑。
+
 ## MCP 服务
 
 Pion 内置了基于 stdio 的 [Model Context Protocol](https://modelcontextprotocol.io/)

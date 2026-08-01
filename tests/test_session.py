@@ -18,6 +18,7 @@ from pion.llm.types import (
 from pion.session import (
     SessionEntry,
     SessionManager,
+    SessionTreeNode,
     compact,
     estimate_tokens,
     should_compact,
@@ -33,7 +34,9 @@ def _assistant(text: str) -> AssistantMessage:
 
 
 def _model(context_window: int = 1000) -> Model:
-    return Model(id="test-model", base_url="http://localhost", context_window=context_window)
+    return Model(
+        id="test-model", base_url="http://localhost", context_window=context_window
+    )
 
 
 def _texts(messages: list) -> list[str]:
@@ -132,6 +135,74 @@ def test_switch_leaf_rejects_unknown_id() -> None:
         pass
     else:
         raise AssertionError("expected KeyError")
+
+
+def test_tree_returns_defensive_nodes_and_resolved_labels(tmp_path: Path) -> None:
+    path = tmp_path / "tree.jsonl"
+    manager = SessionManager(path)
+    root = manager.append_message(_user("root"))
+    branch_a = manager.append_message(_assistant("A"))
+    manager.branch(root)
+    branch_b = manager.append_message(_assistant("B"))
+    manager.append_label_change(branch_b, "preferred")
+
+    roots = manager.get_tree()
+    assert len(roots) == 1
+    assert isinstance(roots[0], SessionTreeNode)
+    assert roots[0].entry.id == root
+    assert [node.entry.id for node in roots[0].children] == [branch_a, branch_b]
+    assert roots[0].children[1].label == "preferred"
+    assert manager.get_label(branch_b) == "preferred"
+
+    loaded = SessionManager.load(path)
+    assert loaded.get_label(branch_b) == "preferred"
+    assert loaded.get_entries()[0] is not loaded.get_entry(root)
+
+
+def test_label_clear_is_append_only() -> None:
+    manager = SessionManager()
+    target = manager.append_message(_user("bookmark me"))
+    manager.append_label_change(target, "checkpoint")
+    assert manager.get_label(target) == "checkpoint"
+    manager.append_label_change(target, "  ")
+    assert manager.get_label(target) is None
+    assert [entry.type for entry in manager.get_entries()] == [
+        "message",
+        "label",
+        "label",
+    ]
+
+
+def test_branch_summary_enters_context_and_records_old_leaf() -> None:
+    manager = SessionManager()
+    root = manager.append_message(_user("root"))
+    old_leaf = manager.append_message(_assistant("old branch"))
+
+    summary_id = manager.branch_with_summary(
+        root,
+        "Tried the old approach",
+        from_id=old_leaf,
+    )
+    entry = manager.get_entry(summary_id)
+    assert entry.parent_id == root
+    assert entry.from_id == old_leaf
+    assert manager.leaf_id == summary_id
+    assert _texts(manager.build_context()) == [
+        "root",
+        "[Branch summary]\nTried the old approach",
+    ]
+
+
+def test_branch_and_reset_leaf() -> None:
+    manager = SessionManager()
+    root = manager.append_message(_user("root"))
+    manager.append_message(_assistant("answer"))
+    manager.branch(root)
+    assert manager.leaf_id == root
+    assert [entry.id for entry in manager.get_branch()] == [root]
+    manager.reset_leaf()
+    assert manager.leaf_id is None
+    assert manager.get_branch() == []
 
 
 # ---------------------------------------------------------------------------

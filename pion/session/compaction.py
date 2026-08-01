@@ -63,6 +63,10 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages so work on the touched files can resume without re-reading the conversation."""
 
+BRANCH_SUMMARIZATION_PROMPT = """Summarize the abandoned conversation branch so another LLM can continue from an earlier point without losing useful discoveries.
+
+Include only information learned on the abandoned branch: approaches tried, files changed or inspected, important results, and pitfalls. Be concise and do not present abandoned decisions as current user instructions."""
+
 #: Signature-compatible with `pion.llm.stream_simple`.
 StreamFn = Callable[[Model, Context, StreamOptions], Any]
 
@@ -177,18 +181,35 @@ async def compact(
     and also returned. Callers that want to keep a recent tail should append
     the compaction entry themselves with the appropriate kept-entry id.
     """
-    conversation_text = serialize_conversation(messages)
-    prompt = (
-        f"<conversation>\n{conversation_text}\n</conversation>\n\n"
-        f"{SUMMARIZATION_PROMPT}"
+    response = await generate_summary(
+        messages,
+        model,
+        stream_fn,
+        api_key=api_key,
     )
-    context = Context(messages=[UserMessage(content=prompt)])
-    stream = stream_fn(model, context, StreamOptions(api_key=api_key))
-    response = await _collect(stream)
-    if response.stop_reason == "error":
-        raise RuntimeError(
-            f"Summarization failed: {response.error_message or 'unknown error'}"
-        )
     summary = response.text()
     session.append_compaction(summary, first_kept_entry_id=None)
     return summary
+
+
+async def generate_summary(
+    messages: list[Message],
+    model: Model,
+    stream_fn: StreamFn,
+    *,
+    api_key: str | None = None,
+    instructions: str = SUMMARIZATION_PROMPT,
+    abort: Any = None,
+) -> AssistantMessage:
+    """Generate a summary without mutating a session."""
+    conversation_text = serialize_conversation(messages)
+    prompt = f"<conversation>\n{conversation_text}\n</conversation>\n\n{instructions}"
+    context = Context(messages=[UserMessage(content=prompt)])
+    stream = stream_fn(model, context, StreamOptions(api_key=api_key, abort=abort))
+    response = await _collect(stream)
+    if response.stop_reason in ("error", "aborted"):
+        raise RuntimeError(
+            f"Summarization {response.stop_reason}: "
+            f"{response.error_message or 'unknown error'}"
+        )
+    return response

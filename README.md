@@ -14,6 +14,57 @@
 
 Pion is a lightweight, extensible Python coding-agent project inspired by the open-source pi agent; it currently provides a foundation for agent loops, LLM providers, tools, sessions, and hooks, and will evolve through further experimentation and extensions.
 
+## Terminal UI
+
+Running `pion` in an interactive terminal now opens the full-screen Textual
+interface. The existing line-oriented REPL remains available for low-capability
+terminals and troubleshooting:
+
+```text
+pion                         # full-screen TUI (default)
+pion --ui tui                # explicitly select the TUI
+pion --ui plain              # legacy line-oriented REPL
+pion --print "your prompt"   # one prompt, then exit; unchanged
+pion --session path.jsonl    # resume a session in the TUI
+```
+
+An interactive launch requires a TTY. In a pipe, CI job, or other non-TTY
+environment, use `--print`; Pion will not attempt to draw a full-screen UI.
+Terminals reporting `TERM=dumb` fall back to the plain interface.
+
+The conversation pane renders streaming Markdown and keeps tool calls in
+collapsed cards. A card shows its status, elapsed time, argument summary,
+output or error, and the originating MCP server when applicable. Scrolling up
+pauses automatic follow; returning to the bottom resumes it.
+
+Keyboard shortcuts:
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Send the editor contents |
+| `Ctrl+J` | Insert a newline |
+| `Esc` | Abort the current turn or branch summary |
+| `Ctrl+P` | Open the command menu |
+| `Ctrl+B` | Toggle or focus the session tree |
+| `Ctrl+Q` | Exit Pion |
+| `Ctrl+O` | Cycle tree filters while the tree is focused |
+| `Shift+L` | Set or clear a label on the selected tree entry |
+
+The session tree is visible on terminals at least 100 columns wide and becomes
+an overlay on narrower terminals. Its filters are `default`, `no-tools`,
+`user-only`, `labeled-only`, and `all`. Selecting a user entry moves to its
+parent and restores the old prompt in the editor for revision; selecting an
+assistant, tool result, compaction, or branch-summary entry moves directly to
+that point. When this abandons the active suffix, Pion offers no summary, a
+default summary, or a summary with custom focus. Summary generation is
+transactional: a failure or abort leaves the active branch and JSONL file
+unchanged.
+
+The TUI supports `/help`, `/model`, `/compact`, `/stats`, `/tree`, `/exit`, and
+commands registered by extensions. Model selection is available in v1;
+sandbox, MCP, and profile configuration remain display-only and are edited
+through the CLI or `~/.pion/config.json`.
+
 ## MCP servers
 
 Pion includes a built-in [Model Context Protocol](https://modelcontextprotocol.io/)

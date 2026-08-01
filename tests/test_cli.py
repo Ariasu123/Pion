@@ -6,19 +6,17 @@ pure helpers factored out of the REPL. No network, no interactive REPL.
 
 from __future__ import annotations
 
-from datetime import datetime
 import re
+from datetime import datetime
 
 import pytest
 import typer
 from typer.testing import CliRunner
 
-from pion import __version__
-from pion.config import MCPServerConfig, PionConfig, ProfileConfig, load_config, save_config
-import pion.cli as cli
+from pion import __version__, cli
 from pion.cli import (
-    app,
     api_key_env_name,
+    app,
     build_system_prompt,
     default_session_path,
     find_first_kept_entry_id,
@@ -26,10 +24,17 @@ from pion.cli import (
     summarize_tool_args,
     summarize_tool_result,
 )
+from pion.config import (
+    MCPServerConfig,
+    PionConfig,
+    ProfileConfig,
+    load_config,
+    save_config,
+)
 from pion.llm.registry import get_model
 from pion.llm.types import AssistantMessage, Model, TextContent, UserMessage
-from pion.session import SessionManager
 from pion.sandbox import SandboxSettings, SandboxUnavailableError, WorkspaceGuard
+from pion.session import SessionManager
 
 runner = CliRunner()
 
@@ -70,7 +75,7 @@ def test_version_prints_version() -> None:
 
 
 def test_unknown_model_exits_nonzero_and_lists_available_ids() -> None:
-    result = runner.invoke(app, ["--model", "no-such-model"])
+    result = runner.invoke(app, ["--model", "no-such-model", "--print", "test"])
     assert result.exit_code != 0
     assert "no-such-model" in result.output
     for available in ("deepseek-v4-flash", "claude-sonnet-4-5", "kimi-k2-0905-preview"):
@@ -79,9 +84,70 @@ def test_unknown_model_exits_nonzero_and_lists_available_ids() -> None:
 
 def test_missing_api_key_names_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    result = runner.invoke(app, [])
+    result = runner.invoke(app, ["--print", "test"])
     assert result.exit_code == 1
     assert "no usable profile or API key" in result.output
+
+
+def test_non_tty_interactive_launch_reports_actionable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "is_interactive", lambda: False)
+    monkeypatch.setattr(cli, "_async_main", pytest.fail)
+    result = runner.invoke(app, ["--api-key", "test-key"])
+    assert result.exit_code == 1
+    assert "interactive mode requires a TTY" in result.output
+    assert "--print" in result.output
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"), [([], "tui"), (["--ui", "plain"], "plain")]
+)
+def test_interactive_ui_mode_is_forwarded(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    expected: str,
+) -> None:
+    captured = {}
+
+    async def capture(*args, **kwargs) -> None:
+        captured["ui_mode"] = args[8]
+
+    monkeypatch.setattr(cli, "is_interactive", lambda: True)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(cli, "_async_main", capture)
+    result = runner.invoke(
+        app,
+        ["--api-key", "test-key", "--sandbox", "off", *arguments],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["ui_mode"] == expected
+
+
+def test_invalid_ui_fails_before_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_async_main", pytest.fail)
+    result = runner.invoke(
+        app,
+        ["--api-key", "test-key", "--ui", "browser", "--print", "test"],
+    )
+    assert result.exit_code == 1
+    assert "--ui must be 'tui' or 'plain'" in result.output
+
+
+def test_print_mode_bypasses_tty_requirement(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    async def capture(*args, **kwargs) -> None:
+        captured["prompt"] = args[4]
+
+    monkeypatch.setattr(cli, "is_interactive", lambda: False)
+    monkeypatch.setattr(cli, "_async_main", capture)
+    result = runner.invoke(
+        app,
+        ["--api-key", "test-key", "--sandbox", "off", "--print", "hello"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["prompt"] == "hello"
 
 
 @pytest.mark.parametrize(
@@ -190,6 +256,8 @@ def test_profile_flag_skips_selection_and_cli_overrides_are_saved(
             "https://new.example/v1",
             "--api-key",
             "new-key",
+            "--print",
+            "test",
         ],
     )
 
@@ -240,7 +308,7 @@ def test_configure_existing_profile_keeps_key_when_left_blank(
 
 
 def test_noninteractive_unknown_profile_fails() -> None:
-    result = runner.invoke(app, ["--profile", "missing"])
+    result = runner.invoke(app, ["--profile", "missing", "--print", "test"])
     assert result.exit_code == 1
     assert "unknown profile" in result.output
 
@@ -264,6 +332,8 @@ def test_complete_custom_cli_settings_create_default_profile(
             "https://vendor.example/v1",
             "--api-key",
             "vendor-key",
+            "--print",
+            "test",
         ],
     )
 
@@ -336,6 +406,8 @@ def test_cli_sandbox_overrides_persisted_policy(
             "bridge",
             "--sandbox-git-write",
             "--allow-project-extensions",
+            "--print",
+            "test",
         ],
     )
 
@@ -366,7 +438,7 @@ def test_sandbox_off_prints_high_visibility_warning(
     monkeypatch.setattr(cli, "_async_main", _noop_async_main)
     result = runner.invoke(
         app,
-        ["--api-key", "test-key", "--sandbox", "off"],
+        ["--api-key", "test-key", "--sandbox", "off", "--print", "test"],
     )
     assert result.exit_code == 0
     assert "SANDBOX DISABLED" in strip_ansi(result.output)

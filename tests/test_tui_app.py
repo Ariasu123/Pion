@@ -233,11 +233,40 @@ async def test_tree_overlay_open_close(tmp_path):
     terminal.feed(b"\x02")  # ctrl+b
     await settle()
     assert "Session tree" in terminal.output()
-    assert tui._tree_overlay is not None
+    assert tui._tree_selector is not None
+    # The tree renders inline in the selector slot above the editor.
+    assert tui._selector_slot.child is tui._selector
     terminal.feed(b"\x1b")  # escape closes
     await settle(0.2)
-    assert tui._tree_overlay is None
+    assert tui._tree_selector is None
+    assert tui._selector is None
+    assert tui._selector_slot.child is None
     await stop_tui(tui, task)
+
+
+async def test_selector_renders_inline_above_editor(tmp_path):
+    tui, terminal, _ = make_tui(tmp_path, [{"text": "hi"}])
+    task = await run_tui(tui)
+    terminal.feed(b"\x0c")  # ctrl+l → model selector
+    await settle()
+    assert tui._selector is not None
+    children = tui.root.children
+    assert children.index(tui._selector_slot) < children.index(tui.editor)
+    assert children.index(tui.chat) < children.index(tui._selector_slot)
+    terminal.feed(b"\x1b")  # escape closes
+    await settle(0.2)
+    assert tui._selector is None
+    await stop_tui(tui, task)
+
+
+async def test_footer_context_percent_uses_real_usage(tmp_path):
+    from pion.llm.types import Usage
+
+    tui, terminal, _ = make_tui(tmp_path, [{"text": "hi"}])
+    tui.controller.last_usage = Usage(input=295, output=218, cacheRead=1400)
+    rendered = "\n".join(strip_ansi(line) for line in tui.footer.render(100))
+    # 295 + 1400 = 1695 tokens of 128k → 1%, not the chars//4 estimate's 0%.
+    assert "1%/128.0k" in rendered
 
 
 async def test_tree_navigation_prefills_editor(tmp_path):

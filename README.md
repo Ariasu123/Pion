@@ -65,7 +65,9 @@ Typing `/` at the start of a line opens fuzzy slash-command completion; `@`
 opens fuzzy file completion. The editor keeps prompt history (Up/Down at the
 first/last line) and supports Emacs-style word navigation and kill keys.
 
-The session tree is a modal selector over the branched JSONL session. Its
+Selectors (model picker, command menu, session tree) open as an inline
+dropdown panel directly above the editor, Claude-Code style. The session
+tree selector navigates the branched JSONL session. Its
 filters are `default`, `no-tools`, `user-only`, `labeled-only`, and `all`.
 Selecting a user entry moves to its parent and restores the old prompt in
 the editor for revision; selecting an assistant, tool result, compaction, or

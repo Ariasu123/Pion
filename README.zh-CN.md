@@ -57,7 +57,8 @@ pion --session path.jsonl    # 在 TUI 中恢复指定会话
 在行首输入 `/` 会弹出斜杠命令模糊补全；输入 `@` 弹出文件模糊补全。编辑器支持
 提示词历史（首行/末行处按 Up/Down）和 Emacs 风格的词移动与删除键。
 
-session tree 是覆盖在对话上的模态选择器，对应带分支的 JSONL 会话。过滤模式包括
+各类选择器（模型选择、命令菜单、session tree）以编辑器上方的内联下拉面板
+形式打开（Claude Code 风格）。session tree 选择器对应带分支的 JSONL 会话。过滤模式包括
 `default`、`no-tools`、`user-only`、`labeled-only` 和 `all`。选择 user entry 会把
 leaf 移到其 parent，并将旧提示词放回编辑器；选择 assistant、tool result、
 compaction 或 branch summary entry 会直接移动到该节点。若切换会放弃当前后缀，

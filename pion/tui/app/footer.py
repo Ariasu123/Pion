@@ -34,6 +34,19 @@ def _git_branch(cwd: Path) -> str | None:
     return branch if result.returncode == 0 and branch else None
 
 
+def _context_tokens(controller) -> int:  # noqa: ANN001
+    """Tokens the next request would send, from real usage when available.
+
+    Both LLM adapters normalize usage so that
+    input + cache_read + cache_write equals the total prompt size; fall
+    back to the chars//4 estimate before the first turn completes.
+    """
+    usage = controller.last_usage
+    if usage is not None:
+        return usage.input + usage.cache_read + usage.cache_write
+    return estimate_tokens(controller.agent.messages)
+
+
 class Footer(Component):
     def __init__(
         self,
@@ -73,7 +86,7 @@ class Footer(Component):
                 f" W{_fmt_tokens(usage.cache_write)}"
                 f" ${cost:.3f}"
             )
-        tokens = estimate_tokens(agent.messages)
+        tokens = _context_tokens(self.controller)
         window = agent.model.context_window
         percent = min(100, round(tokens / max(1, window) * 100))
         ctx_token = "dim"

@@ -22,7 +22,6 @@ from ...llm.types import (
     ToolResultMessage,
     UserMessage,
 )
-from ...session import estimate_tokens
 from ..components import (
     CombinedAutocompleteProvider,
     Editor,
@@ -34,7 +33,6 @@ from ..components import (
 )
 from ..core.component import Component, Container
 from ..core.keys import KeyDecoder
-from ..core.overlays import Overlay, OverlayOptions
 from ..core.renderer import InlineRenderer
 from ..core.terminal import ProcessTerminal, Terminal
 from ..theme import Theme, list_themes, load_theme, set_theme
@@ -45,7 +43,7 @@ from .chat import (
     UserMessageComponent,
     message_text,
 )
-from .footer import Footer
+from .footer import Footer, _context_tokens
 from .queue import MessageQueue
 from .selectors import OverlayPanel, TextInput, TreeSelector
 
@@ -104,6 +102,7 @@ class PionTUI:
         # Layout.
         self.chat = Container()
         self._slot = _Slot()
+        self._selector_slot = _Slot()  # inline selector above the editor
         self.editor = Editor(
             on_submit=self._submit,
             autocomplete=CombinedAutocompleteProvider(self._slash_commands(), Path.cwd()),
@@ -116,7 +115,14 @@ class PionTUI:
             theme=self.theme,
         )
         self.root = Container(
-            [self._build_header(), self.chat, self._slot, self.editor, self.footer]
+            [
+                self._build_header(),
+                self.chat,
+                self._slot,
+                self._selector_slot,
+                self.editor,
+                self.footer,
+            ]
         )
         self.renderer = InlineRenderer(self.terminal, self.root)
         self._decoder = KeyDecoder()
@@ -127,7 +133,7 @@ class PionTUI:
         self._exit = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
         self._ticker: asyncio.Task | None = None
-        self._tree_overlay: Overlay | None = None
+        self._selector: Component | None = None
         self._tree_selector: TreeSelector | None = None
         self._compaction_notice: Notice | None = None
 
@@ -212,7 +218,9 @@ class PionTUI:
 
     def _dispatch(self, key) -> None:
         overlay = self.renderer.overlays.top
-        if overlay is not None:
+        if self._selector is not None:
+            self._selector.handle_input(key)
+        elif overlay is not None:
             overlay.component.handle_input(key)
         elif key.key == "ctrl+q" or key.key == "ctrl+d" and not self.editor.text:
             self.quit()
@@ -416,13 +424,18 @@ class PionTUI:
             return "".join(texts)
         return "[non-text tool result]" if content else ""
 
-    # -- overlays ------------------------------------------------------------
+    # -- selectors (inline above the editor) ---------------------------------
 
-    def _push_panel(self, title: str, body: Component, width: float = 0.6) -> Overlay:
-        panel = OverlayPanel(title, body, theme=self.theme)
-        overlay = self.renderer.overlays.push(panel, OverlayOptions(width=width))
+    def _open_selector(self, panel: Component) -> None:
+        """Show a selector panel in the slot directly above the editor."""
+        self._selector = panel
+        self._selector_slot.child = panel
         self.renderer.request_render()
-        return overlay
+
+    def _close_selector(self) -> None:
+        self._selector = None
+        self._selector_slot.child = None
+        self.renderer.request_render()
 
     def open_choice(
         self,
@@ -430,11 +443,8 @@ class PionTUI:
         items: list[tuple[str, str, str]],
         on_done,  # Callable[[str | None], None]
     ) -> None:
-        overlay_ref: dict[str, Overlay] = {}
-
         def close(value: str | None) -> None:
-            overlay_ref["overlay"].close()
-            self.renderer.request_render()
+            self._close_selector()
             on_done(value)
 
         select = SelectList(
@@ -443,7 +453,7 @@ class PionTUI:
             on_cancel=lambda: close(None),
             theme=self.theme,
         )
-        overlay_ref["overlay"] = self._push_panel(title, select)
+        self._open_selector(OverlayPanel(title, select, theme=self.theme))
 
     def open_text_input(
         self,
@@ -452,11 +462,8 @@ class PionTUI:
         placeholder: str,
         on_done,  # Callable[[str | None], None]
     ) -> None:
-        overlay_ref: dict[str, Overlay] = {}
-
         def close(value: str | None) -> None:
-            overlay_ref["overlay"].close()
-            self.renderer.request_render()
+            self._close_selector()
             on_done(value)
 
         input_ = TextInput(
@@ -466,7 +473,7 @@ class PionTUI:
             on_cancel=lambda: close(None),
             theme=self.theme,
         )
-        overlay_ref["overlay"] = self._push_panel(title, input_, width=0.5)
+        self._open_selector(OverlayPanel(title, input_, theme=self.theme))
 
     def open_model_selector(self) -> None:
         models = {model.id: model for model in list_models()}
@@ -504,7 +511,7 @@ class PionTUI:
     # -- session tree -----------------------------------------------------------
 
     def open_tree(self) -> None:
-        if self._tree_overlay is not None:
+        if self._tree_selector is not None:
             return
         selector = TreeSelector(
             self.controller.session,
@@ -514,14 +521,19 @@ class PionTUI:
             theme=self.theme,
         )
         self._tree_selector = selector
-        self._tree_overlay = self._push_panel("Session tree", selector, width=0.7)
+        self._reopen_tree_panel()
+
+    def _reopen_tree_panel(self) -> None:
+        """Show the tree panel again after a sub-dialog is dismissed."""
+        if self._tree_selector is not None:
+            self._open_selector(
+                OverlayPanel("Session tree", self._tree_selector, theme=self.theme)
+            )
 
     def _close_tree(self) -> None:
-        if self._tree_overlay is not None:
-            self._tree_overlay.close()
-            self._tree_overlay = None
+        if self._tree_selector is not None:
             self._tree_selector = None
-            self.renderer.request_render()
+            self._close_selector()
 
     def _tree_navigate(self, entry_id: str) -> None:
         if self.controller.is_busy:
@@ -538,6 +550,7 @@ class PionTUI:
 
         def done(value: str | None) -> None:
             if value is None:
+                self._reopen_tree_panel()
                 return
             if value == "plain":
                 self._spawn(self._navigate(entry_id))
@@ -546,7 +559,9 @@ class PionTUI:
             else:
 
                 def instructions_done(text: str | None) -> None:
-                    if text is not None:
+                    if text is None:
+                        self._reopen_tree_panel()
+                    else:
                         self._spawn(
                             self._navigate(
                                 entry_id, summarize=True, instructions=text
@@ -589,6 +604,7 @@ class PionTUI:
 
         def done(value: str | None) -> None:
             if value is None:
+                self._reopen_tree_panel()
                 return
 
             async def apply() -> None:
@@ -598,6 +614,7 @@ class PionTUI:
                     self.notice(f"Could not update label: {exc}", fg="error")
                 if self._tree_selector is not None:
                     self._tree_selector.refresh()
+                self._reopen_tree_panel()
                 self.renderer.request_render()
 
             self._spawn(apply())
@@ -660,7 +677,7 @@ class PionTUI:
 
     def _show_stats(self) -> None:
         usage = self.controller.last_usage
-        tokens = estimate_tokens(self.controller.agent.messages)
+        tokens = _context_tokens(self.controller)
         context = min(
             100,
             round(tokens / max(1, self.controller.agent.model.context_window) * 100),

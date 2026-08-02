@@ -14,14 +14,16 @@ from .base import (
     SandboxSettings,
     SandboxUnavailableError,
 )
-from .docker import DockerSandboxRuntime
+from .docker import DockerSandboxRuntime, check_docker_available
 from .workspace import WorkspaceAccessError, WorkspaceGuard
 
 
 def build_runtime(settings: SandboxSettings, workspace: Path) -> SandboxRuntime:
-    """Construct the configured runtime without starting side effects."""
-    if settings.backend == "docker":
-        return DockerSandboxRuntime(workspace, settings)
+    """Construct the runtime for the default (unsandboxed) host mode.
+
+    Sandboxed execution is mounted via the `pion mcp` server instead; see
+    `sandbox.backend == "mcp"` in the CLI.
+    """
     return HostSandboxRuntime(workspace, settings)
 
 
@@ -38,4 +40,5 @@ __all__ = [
     "WorkspaceAccessError",
     "WorkspaceGuard",
     "build_runtime",
+    "check_docker_available",
 ]

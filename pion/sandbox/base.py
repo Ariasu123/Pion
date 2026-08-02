@@ -6,15 +6,16 @@ import asyncio
 import os
 import signal
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .workspace import WorkspaceGuard
 
-SandboxBackend = Literal["docker", "off"]
+SandboxBackend = Literal["off", "mcp"]
 SandboxNetwork = Literal["bridge", "none"]
 OutputCallback = Callable[[str], None]
 
@@ -32,7 +33,7 @@ class SandboxSettings(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    backend: SandboxBackend = "docker"
+    backend: SandboxBackend = "off"
     image: str | None = None
     network: SandboxNetwork = "bridge"
     memory_mb: int = Field(default=4096, ge=128)
@@ -40,6 +41,18 @@ class SandboxSettings(BaseModel):
     pids_limit: int = Field(default=256, ge=16)
     git_write: bool = False
     protect_paths: list[str] = Field(default_factory=lambda: [".env", ".env.*"])
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def migrate_docker_backend(cls, value: str) -> str:
+        """Map the removed integrated "docker" backend to "mcp".
+
+        The Docker engine is unchanged; sandboxed execution is simply
+        served through the `pion mcp` server now.
+        """
+        if value == "docker":
+            return "mcp"
+        return value
 
     @field_validator("image")
     @classmethod
@@ -107,8 +120,8 @@ class SandboxRuntime(ABC):
         command: str,
         *,
         timeout_s: int,
-        abort: Optional[asyncio.Event],
-        on_update: Optional[OutputCallback],
+        abort: asyncio.Event | None,
+        on_update: OutputCallback | None,
         max_output_bytes: int,
     ) -> SandboxCommandResult:
         """Execute one shell command inside this runtime."""
@@ -142,8 +155,8 @@ class HostSandboxRuntime(SandboxRuntime):
         command: str,
         *,
         timeout_s: int,
-        abort: Optional[asyncio.Event],
-        on_update: Optional[OutputCallback],
+        abort: asyncio.Event | None,
+        on_update: OutputCallback | None,
         max_output_bytes: int,
     ) -> SandboxCommandResult:
         try:

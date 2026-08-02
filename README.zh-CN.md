@@ -108,25 +108,46 @@ Pion 内置了基于 stdio 的 [Model Context Protocol](https://modelcontextprot
 启动和关闭错误中会隐藏已配置的环境变量值。超时时间同时用于连接、工具发现和工具
 调用。
 
-stdio MCP 服务是受信任的宿主进程，**不会**在 Pion 的 Docker 沙盒中运行，能够访问
-Pion 进程可访问的宿主资源。请只配置你信任的服务和命令。首版仅支持通过 stdio
-使用 MCP tools，暂不提供 resources、prompts 和 Streamable HTTP。
+stdio MCP 服务是受信任的宿主进程（pion 自带的 `pion mcp` 沙盒服务除外），
+**不会**在 Pion 的 Docker 沙盒中运行，能够访问 Pion 进程可访问的宿主资源。请只
+配置你信任的服务和命令。首版仅支持通过 stdio 使用 MCP tools，暂不提供
+resources、prompts 和 Streamable HTTP。
 
-## Docker 沙盒
+## 沙盒（以 MCP 方式挂载）
 
-Pion 默认使用 Docker 沙盒运行 shell 和文件工具。Docker 采用失败关闭策略：
-如果 Docker CLI、daemon、镜像构建或容器启动不可用，Pion 会在向模型发送请求前退出。
-只有明确需要不受限制的宿主执行时，才应使用 `--sandbox off`。
+默认情况下 Pion 的 shell 和文件工具**直接在宿主机运行**——不启动 Docker、不启用
+沙盒。沙盒是一项按需挂载的 MCP 能力：
 
-Pion 进程本身、模型凭据、配置和会话保留在宿主机上。每个 Pion 进程会创建一个
+```text
+pion                       # 宿主工具，无沙盒（默认）
+pion --sandbox mcp         # 以 MCP 服务方式挂载 Docker 沙盒
+```
+
+使用 `--sandbox mcp`（或在 `~/.pion/config.json` 中设置 `"sandbox": {"backend":
+"mcp"}`）后，Pion 会启动自带的 `pion mcp` 子进程并像挂载其他 MCP 服务一样挂载它。
+默认工具变为 `sandbox__bash`、`sandbox__read`、`sandbox__write`、`sandbox__edit`，
+宿主机默认工具**不再注册**。Docker 采用失败关闭策略：daemon 不可用时，Pion 会在向
+模型发送请求前退出。
+
+同一个 `pion mcp` 服务也可以被**任意 MCP client**（Claude Code、Cursor 等）挂载：
+
+```json
+{
+  "mcpServers": {
+    "pion-sandbox": { "command": "pion", "args": ["mcp"] }
+  }
+}
+```
+
+Pion 进程本身、模型凭据、配置和会话保留在宿主机上。每个沙盒服务进程会创建一个
 一次性的非 root 容器，并仅将当前项目以相同的绝对路径绑定挂载到容器中。因此，
 项目修改会实时反映到宿主机。Git 元数据默认只读；文件工具无法访问 `.env` 文件，
 容器内对应路径也会被遮蔽；宿主环境变量和 Docker socket 不会注入容器。
 
-常用选项：
+常用选项（会转发给沙盒服务）：
 
 ```text
---sandbox docker|off
+--sandbox off|mcp
 --sandbox-image IMAGE
 --sandbox-network bridge|none
 --sandbox-git-write
@@ -144,7 +165,7 @@ Pion 进程本身、模型凭据、配置和会话保留在宿主机上。每个
 {
   "version": 1,
   "sandbox": {
-    "backend": "docker",
+    "backend": "off",
     "image": null,
     "network": "bridge",
     "memory_mb": 4096,
@@ -157,6 +178,9 @@ Pion 进程本身、模型凭据、配置和会话保留在宿主机上。每个
   "profiles": {}
 }
 ```
+
+旧的 `"backend": "docker"` 配置会自动迁移为 `"mcp"`——进程内集成的 Docker 路径
+已移除，同一套加固容器引擎现在运行在 `pion mcp` 服务内部。
 
 自定义镜像必须已经存在于 Docker 本地，并提供 `sleep` 以及 Agent 所需的工具。
 内置镜像包含 Python 3.12、uv、Bash、Git、ripgrep、curl、CA 证书和基础编译工具。

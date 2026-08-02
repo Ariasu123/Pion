@@ -122,30 +122,52 @@ variables are inherited. Environment values are redacted from Pion's MCP
 startup and shutdown errors. The timeout applies to connection setup,
 discovery, and tool calls.
 
-MCP stdio servers are trusted host processes. They are **not** run inside
-Pion's Docker sandbox and may access resources available to the Pion process.
-Only configure servers and commands you trust. This first release supports MCP
-tools over stdio; MCP resources, prompts, and Streamable HTTP are not yet
-exposed.
+MCP stdio servers are trusted host processes. Except for Pion's own `pion
+mcp` sandbox server, they are **not** run inside the Docker sandbox and may
+access resources available to the Pion process. Only configure servers and
+commands you trust. This first release supports MCP tools over stdio; MCP
+resources, prompts, and Streamable HTTP are not yet exposed.
 
-## Docker sandbox
+## Sandbox (mounted as MCP)
 
-Pion runs its default shell and file tools with a Docker sandbox. Docker is
-fail-closed: if the CLI, daemon, image build, or container startup is
-unavailable, Pion exits before sending a request to the model. Use
-`--sandbox off` only when unrestricted host execution is intentional.
-
-The sandbox keeps Pion itself, model credentials, configuration, and sessions
-on the host. It creates one disposable, non-root container per Pion process and
-bind-mounts only the current project at the same absolute path. Project changes
-are therefore visible immediately on the host. Git metadata is read-only by
-default, `.env` files are denied to file tools and masked in the container, and
-host environment variables and the Docker socket are not injected.
-
-Useful options:
+By default Pion runs its shell and file tools **directly on the host** — no
+Docker, no sandbox. Sandboxing is an opt-in capability mounted through MCP:
 
 ```text
---sandbox docker|off
+pion                       # host tools, no sandbox (default)
+pion --sandbox mcp         # mount the Docker sandbox as an MCP server
+```
+
+With `--sandbox mcp` (or `"sandbox": {"backend": "mcp"}` in
+`~/.pion/config.json`), Pion starts its own `pion mcp` child process and
+mounts it like any other MCP server. The default tools become
+`sandbox__bash`, `sandbox__read`, `sandbox__write`, `sandbox__edit`, and the
+host-side default tools are **not** registered. Docker is fail-closed: if
+the daemon is unavailable, Pion exits before sending a request to the model.
+
+The same `pion mcp` server can be mounted by **any MCP client** (Claude
+Code, Cursor, …):
+
+```json
+{
+  "mcpServers": {
+    "pion-sandbox": { "command": "pion", "args": ["mcp"] }
+  }
+}
+```
+
+The sandbox keeps Pion itself, model credentials, configuration, and sessions
+on the host. It creates one disposable, non-root container per server process
+and bind-mounts only the current project at the same absolute path. Project
+changes are therefore visible immediately on the host. Git metadata is
+read-only by default, `.env` files are denied to file tools and masked in the
+container, and host environment variables and the Docker socket are not
+injected.
+
+Useful options (forwarded to the sandbox server):
+
+```text
+--sandbox off|mcp
 --sandbox-image IMAGE
 --sandbox-network bridge|none
 --sandbox-git-write
@@ -165,7 +187,7 @@ Sandbox defaults can be stored in the version 1 configuration:
 {
   "version": 1,
   "sandbox": {
-    "backend": "docker",
+    "backend": "off",
     "image": null,
     "network": "bridge",
     "memory_mb": 4096,
@@ -178,6 +200,10 @@ Sandbox defaults can be stored in the version 1 configuration:
   "profiles": {}
 }
 ```
+
+Legacy `"backend": "docker"` values are migrated to `"mcp"` automatically —
+the integrated in-process Docker path no longer exists; the same hardened
+container engine now lives inside the `pion mcp` server.
 
 A custom image must already be available to Docker and provide `sleep` plus the
 tools needed by the agent. The built-in image contains Python 3.12, uv, Bash,

@@ -9,7 +9,6 @@ import re
 import shutil
 import uuid
 from pathlib import Path
-from typing import Optional
 
 from .. import __version__
 from .base import (
@@ -35,6 +34,41 @@ RUN apt-get update \\
 
 CMD ["sleep", "infinity"]
 """
+
+
+async def check_docker_available() -> None:
+    """Fail-closed preflight for the MCP sandbox backend.
+
+    The `pion mcp` child builds/starts the container lazily; the parent CLI
+    only verifies the daemon is reachable so configuration errors surface
+    before any model request.
+    """
+    if shutil.which("docker") is None:
+        raise SandboxUnavailableError(
+            "The MCP sandbox backend requires the Docker CLI, which was not "
+            "found in PATH. Install Docker or run with --sandbox off."
+        )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker",
+            "info",
+            "--format",
+            "{{.ServerVersion}}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        output, _ = await proc.communicate()
+    except OSError as exc:
+        raise SandboxUnavailableError(
+            f"Could not query the Docker daemon: {exc}"
+        ) from exc
+    if proc.returncode != 0:
+        details = output.decode("utf-8", "replace").strip()[:300]
+        raise SandboxUnavailableError(
+            "The MCP sandbox backend is enabled, but the Docker daemon is "
+            "unavailable. Start Docker Desktop/OrbStack or run with "
+            f"--sandbox off. Details: {details}"
+        )
 
 
 class DockerSandboxRuntime(SandboxRuntime):
@@ -142,8 +176,8 @@ class DockerSandboxRuntime(SandboxRuntime):
         command: str,
         *,
         timeout_s: int,
-        abort: Optional[asyncio.Event],
-        on_update: Optional[OutputCallback],
+        abort: asyncio.Event | None,
+        on_update: OutputCallback | None,
         max_output_bytes: int,
     ) -> SandboxCommandResult:
         await self.start()

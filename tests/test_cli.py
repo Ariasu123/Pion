@@ -7,6 +7,7 @@ pure helpers factored out of the REPL. No network, no interactive REPL.
 from __future__ import annotations
 
 import re
+import sys
 from datetime import datetime
 
 import pytest
@@ -413,7 +414,9 @@ def test_cli_sandbox_overrides_persisted_policy(
 
     assert result.exit_code == 0, result.output
     settings = captured["settings"]
-    assert settings.backend == "docker"
+    # Deprecated alias: --sandbox docker now maps to the MCP backend.
+    assert settings.backend == "mcp"
+    assert "deprecated" in result.output
     assert settings.image == "cli:image"
     assert settings.network == "bridge"
     assert settings.git_write is True
@@ -432,16 +435,17 @@ def test_invalid_sandbox_cli_value_fails_before_starting(
     assert "--sandbox must be" in result.output
 
 
-def test_sandbox_off_prints_high_visibility_warning(
+def test_sandbox_off_prints_no_warning_banner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # "off" is the normal default mode now — no scary banner on every launch.
     monkeypatch.setattr(cli, "_async_main", _noop_async_main)
     result = runner.invoke(
         app,
         ["--api-key", "test-key", "--sandbox", "off", "--print", "test"],
     )
     assert result.exit_code == 0
-    assert "SANDBOX DISABLED" in strip_ansi(result.output)
+    assert "SANDBOX DISABLED" not in strip_ansi(result.output)
 
 
 class _FakeStartupRuntime:
@@ -495,12 +499,18 @@ async def test_async_startup_fails_closed_before_session_or_agent(
 
 
 @pytest.mark.parametrize(
-    ("allow_project_extensions", "expected_include_project"),
-    [(False, False), (True, True)],
+    ("backend", "allow_project_extensions", "expected_include_project"),
+    [
+        ("off", False, True),
+        ("off", True, True),
+        ("mcp", False, False),
+        ("mcp", True, True),
+    ],
 )
 async def test_sandbox_controls_project_extension_search(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
+    backend: str,
     allow_project_extensions: bool,
     expected_include_project: bool,
 ) -> None:
@@ -511,6 +521,18 @@ async def test_sandbox_controls_project_extension_search(
         seen.append(include_project)
         return []
 
+    class FakeMCPManager:
+        def __init__(self, servers):
+            self.tools = []
+            self.errors = []
+            self.connected_server_count = 1
+
+        async def start(self, reserved):
+            pass
+
+        async def close(self):
+            pass
+
     class NoopRepl:
         def __init__(self, *args, **kwargs):
             pass
@@ -518,22 +540,28 @@ async def test_sandbox_controls_project_extension_search(
         async def run_print(self, text):
             return None
 
+    async def noop_docker_check():
+        return None
+
     monkeypatch.setattr(cli, "build_runtime", lambda settings, workspace: runtime)
+    monkeypatch.setattr(cli, "check_docker_available", noop_docker_check)
+    monkeypatch.setattr(cli, "MCPClientManager", FakeMCPManager)
     monkeypatch.setattr(cli, "extension_dirs", capture_extension_dirs)
     monkeypatch.setattr(cli, "Repl", NoopRepl)
 
     await cli._async_main(
         get_model("deepseek-v4-flash"),
         "key",
-        tmp_path / f"{allow_project_extensions}.jsonl",
+        tmp_path / f"{backend}-{allow_project_extensions}.jsonl",
         False,
         "prompt",
-        SandboxSettings(network="none"),
+        SandboxSettings(backend=backend, network="none"),
         allow_project_extensions,
     )
 
     assert seen == [expected_include_project]
-    assert runtime.closed
+    if backend == "off":
+        assert runtime.closed
 
 
 async def test_async_startup_connects_and_closes_configured_mcp(
@@ -583,6 +611,91 @@ async def test_async_startup_connects_and_closes_configured_mcp(
     assert {"read", "write", "edit", "bash"} <= seen["reserved"]
     assert seen["closed"]
     assert runtime.closed
+
+
+async def test_async_startup_mcp_backend_mounts_internal_sandbox(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = {}
+
+    async def fake_docker_check():
+        seen["preflight"] = True
+
+    class FakeMCPManager:
+        def __init__(self, servers):
+            seen["servers"] = servers
+            self.tools = []
+            self.errors = []
+            self.connected_server_count = 1
+
+        async def start(self, reserved):
+            seen["reserved"] = reserved
+
+        async def close(self):
+            seen["closed"] = True
+
+    class NoopRepl:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run_print(self, text):
+            return None
+
+    def fail_build_runtime(settings, workspace):
+        raise AssertionError("mcp backend must not build a host runtime")
+
+    monkeypatch.setattr(cli, "build_runtime", fail_build_runtime)
+    monkeypatch.setattr(cli, "check_docker_available", fake_docker_check)
+    monkeypatch.setattr(cli, "MCPClientManager", FakeMCPManager)
+    monkeypatch.setattr(cli, "Repl", NoopRepl)
+
+    await cli._async_main(
+        get_model("deepseek-v4-flash"),
+        "key",
+        tmp_path / "mcp-sandbox.jsonl",
+        True,
+        "prompt",
+        SandboxSettings(backend="mcp", network="none", git_write=True),
+        False,
+        None,
+    )
+
+    assert seen["preflight"]
+    sandbox_server = seen["servers"]["sandbox"]
+    assert sandbox_server.command == sys.executable
+    assert sandbox_server.args == ["-m", "pion.cli", "mcp"]
+    assert sandbox_server.env["PION_SANDBOX_NETWORK"] == "none"
+    assert sandbox_server.env["PION_SANDBOX_GIT_WRITE"] == "1"
+    # No host default tools are registered in MCP mode.
+    assert not ({"read", "write", "edit", "bash"} & seen["reserved"])
+    assert seen["closed"]
+
+
+async def test_async_startup_mcp_backend_fails_closed_without_docker(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_docker_check():
+        raise SandboxUnavailableError("no daemon")
+
+    monkeypatch.setattr(cli, "check_docker_available", failing_docker_check)
+    monkeypatch.setattr(
+        cli, "build_runtime", lambda *a: pytest.fail("must not build runtime")
+    )
+
+    with pytest.raises(typer.Exit) as excinfo:
+        await cli._async_main(
+            get_model("deepseek-v4-flash"),
+            "key",
+            tmp_path / "mcp-fail.jsonl",
+            True,
+            "prompt",
+            SandboxSettings(backend="mcp"),
+            False,
+            None,
+        )
+    assert excinfo.value.exit_code == 1
 
 
 # ---------------------------------------------------------------------------

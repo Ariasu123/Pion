@@ -18,7 +18,7 @@ import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -48,8 +48,10 @@ from .llm.types import (
 from .mcp import MCPClientManager
 from .sandbox import (
     SandboxError,
+    SandboxRuntime,
     SandboxSettings,
     build_runtime,
+    check_docker_available,
 )
 from .session import SessionManager, estimate_tokens, should_compact
 from .tools import build_default_tools
@@ -72,7 +74,7 @@ DEFAULT_MODEL_ID = "deepseek-v4-flash"
 
 
 def default_session_path(
-    now: Optional[datetime] = None, base_dir: Optional[Path] = None
+    now: datetime | None = None, base_dir: Path | None = None
 ) -> Path:
     """Session file path: <base>/yyyymmdd-HHMMSS-<uuid8>.jsonl.
 
@@ -84,7 +86,7 @@ def default_session_path(
     return base / f"{now:%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}.jsonl"
 
 
-def parse_slash_command(text: str) -> Optional[tuple[str, str]]:
+def parse_slash_command(text: str) -> tuple[str, str] | None:
     """Parse '/name args' into (name, args); None when not a slash command."""
     stripped = text.strip()
     if not stripped.startswith("/") or stripped == "/":
@@ -342,8 +344,14 @@ def resolve_sandbox_settings(
     """Apply CLI sandbox overrides on top of the persisted v1 config."""
     updates: dict[str, object] = {}
     if backend is not None:
-        if backend not in ("docker", "off"):
-            raise ConfigError("--sandbox must be 'docker' or 'off'")
+        if backend == "docker":
+            err_console.print(
+                "[yellow]--sandbox docker is deprecated; the sandbox now runs "
+                "through the MCP backend (--sandbox mcp).[/yellow]"
+            )
+            backend = "mcp"
+        if backend not in ("off", "mcp"):
+            raise ConfigError("--sandbox must be 'off' or 'mcp'")
         updates["backend"] = backend
     if image is not None:
         if not image.strip():
@@ -392,7 +400,7 @@ Guidelines:
 - Do what was asked and stop; don't take extra actions the user didn't request."""
 
 
-def find_first_kept_entry_id(session: SessionManager, model: Model) -> Optional[str]:
+def find_first_kept_entry_id(session: SessionManager, model: Model) -> str | None:
     """Session entry id of the earliest message to keep after compaction.
 
     "Kept" is the newest tail of branch messages totaling roughly <= 50% of
@@ -450,7 +458,7 @@ class StreamRenderer:
 
     def __init__(self, out: Console) -> None:
         self.console = out
-        self._open: Optional[str] = None  # "text" | "thinking" line in progress
+        self._open: str | None = None  # "text" | "thinking" line in progress
 
     def _close_line(self) -> None:
         if self._open is not None:
@@ -725,48 +733,57 @@ def _version_callback(value: bool) -> None:
 async def _async_main(
     model: Model,
     api_key: str,
-    session_path: Optional[Path],
+    session_path: Path | None,
     no_extensions: bool,
-    print_prompt: Optional[str],
+    print_prompt: str | None,
     sandbox_settings: SandboxSettings,
     allow_project_extensions: bool,
-    mcp_servers: Optional[dict[str, MCPServerConfig]] = None,
+    mcp_servers: dict[str, MCPServerConfig] | None = None,
     ui_mode: str = "plain",
     theme_name: str = "dark",
 ) -> None:
-    runtime = build_runtime(sandbox_settings, Path.cwd())
-    mcp_manager: Optional[MCPClientManager] = None
+    sandbox_backend = sandbox_settings.backend
+    runtime: SandboxRuntime | None = None
+    mcp_manager: MCPClientManager | None = None
     try:
-        try:
-            # Fail before constructing the Agent or issuing any model request.
-            await runtime.start()
-        except SandboxError as exc:
-            err_console.print(
-                f"[red]Sandbox startup failed:[/red] {escape(str(exc))}",
-                soft_wrap=True,
-            )
-            raise typer.Exit(1) from exc
-
-        if (
-            sandbox_settings.backend == "docker"
-            and sandbox_settings.network == "bridge"
-        ):
-            err_console.print(
-                "[yellow]Sandbox notice:[/yellow] Docker bridge networking is enabled; "
-                "it does not prevent source exfiltration. Use "
-                "--sandbox-network none for untrusted repositories.",
-                soft_wrap=True,
-            )
+        if sandbox_backend == "mcp":
+            try:
+                # Fail before constructing the Agent or issuing any model request.
+                await check_docker_available()
+            except SandboxError as exc:
+                err_console.print(
+                    f"[red]Sandbox startup failed:[/red] {escape(str(exc))}",
+                    soft_wrap=True,
+                )
+                raise typer.Exit(1) from exc
+            if sandbox_settings.network == "bridge":
+                err_console.print(
+                    "[yellow]Sandbox notice:[/yellow] Docker bridge networking is enabled; "
+                    "it does not prevent source exfiltration. Use "
+                    "--sandbox-network none for untrusted repositories.",
+                    soft_wrap=True,
+                )
+        else:
+            runtime = build_runtime(sandbox_settings, Path.cwd())
+            try:
+                # Fail before constructing the Agent or issuing any model request.
+                await runtime.start()
+            except SandboxError as exc:
+                err_console.print(
+                    f"[red]Sandbox startup failed:[/red] {escape(str(exc))}",
+                    soft_wrap=True,
+                )
+                raise typer.Exit(1) from exc
 
         # Project extensions are host Python code and are disabled by default
         # whenever a sandbox policy is active.
-        extensions: Optional[ExtensionManager] = None
+        extensions: ExtensionManager | None = None
         if not no_extensions:
             extensions = ExtensionManager()
             include_project = (
-                sandbox_settings.backend == "off" or allow_project_extensions
+                sandbox_backend == "off" or allow_project_extensions
             )
-            if sandbox_settings.backend != "off" and allow_project_extensions:
+            if sandbox_backend != "off" and allow_project_extensions:
                 err_console.print(
                     "[bold yellow]WARNING:[/bold yellow] project extensions execute "
                     "as trusted Python in the host Pion process and can bypass the sandbox.",
@@ -782,19 +799,38 @@ async def _async_main(
             for error in extensions.errors:
                 err_console.print(f"[dim yellow]Extension error: {error}[/dim yellow]")
 
+        servers = dict(mcp_servers or {})
+        if sandbox_backend == "mcp":
+            # Mount pion's own sandbox MCP server: the default tools run in
+            # Docker inside the child process instead of on the host.
+            env: dict[str, str] = {
+                "PION_SANDBOX_NETWORK": sandbox_settings.network,
+                "PION_SANDBOX_MEMORY_MB": str(sandbox_settings.memory_mb),
+                "PION_SANDBOX_CPUS": str(sandbox_settings.cpus),
+            }
+            if sandbox_settings.image:
+                env["PION_SANDBOX_IMAGE"] = sandbox_settings.image
+            if sandbox_settings.git_write:
+                env["PION_SANDBOX_GIT_WRITE"] = "1"
+            servers["sandbox"] = MCPServerConfig(
+                command=sys.executable,
+                args=["-m", "pion.cli", "mcp"],
+                env=env,
+            )
         enabled_mcp = {
-            name: server
-            for name, server in (mcp_servers or {}).items()
-            if server.enabled
+            name: server for name, server in servers.items() if server.enabled
         }
         if enabled_mcp:
-            err_console.print(
-                "[bold yellow]MCP security notice:[/bold yellow] stdio MCP servers "
-                "run as trusted host processes and are not isolated by the Docker sandbox.",
-                soft_wrap=True,
+            if any(name != "sandbox" for name in enabled_mcp):
+                err_console.print(
+                    "[bold yellow]MCP security notice:[/bold yellow] stdio MCP servers "
+                    "run as trusted host processes and are not isolated by the Docker sandbox.",
+                    soft_wrap=True,
+                )
+            mcp_manager = MCPClientManager(servers)
+            default_tools = (
+                [] if sandbox_backend == "mcp" else build_default_tools(runtime)
             )
-            mcp_manager = MCPClientManager(mcp_servers or {})
-            default_tools = build_default_tools(runtime)
             reserved_names = {tool.name for tool in default_tools}
             if extensions is not None:
                 reserved_names.update(tool.name for tool in extensions.tools)
@@ -878,45 +914,48 @@ async def _async_main(
                 err_console.print(
                     f"[dim yellow]MCP shutdown error: {escape(error)}[/dim yellow]"
                 )
-        await runtime.close()
+        if runtime is not None:
+            await runtime.close()
 
 
-@app.command()
+@app.callback(invoke_without_command=True)
 def main(
-    model_id: Optional[str] = typer.Option(
+    ctx: typer.Context,
+    model_id: str | None = typer.Option(
         None, "--model", "-m", help="Model id (overrides and updates the profile)."
     ),
-    api_key: Optional[str] = typer.Option(
+    api_key: str | None = typer.Option(
         None,
         "--api-key",
         help="API key (default: provider env var, e.g. DEEPSEEK_API_KEY).",
     ),
-    base_url: Optional[str] = typer.Option(
+    base_url: str | None = typer.Option(
         None, "--base-url", help="Override the model's API base URL."
     ),
-    profile: Optional[str] = typer.Option(
+    profile: str | None = typer.Option(
         None, "--profile", help="Use a saved connection profile."
     ),
     configure: bool = typer.Option(
         False, "--configure", help="Create or update a connection profile."
     ),
-    session: Optional[Path] = typer.Option(
+    session: Path | None = typer.Option(
         None, "--session", help="Resume (or create) a JSONL session file."
     ),
     no_extensions: bool = typer.Option(
         False, "--no-extensions", help="Do not load any extensions."
     ),
-    sandbox: Optional[str] = typer.Option(
+    sandbox: str | None = typer.Option(
         None,
         "--sandbox",
-        help="Execution backend: docker (default) or off (unrestricted host).",
+        help="Execution backend: off (default, unrestricted host) or mcp "
+        "(Docker sandbox mounted as an MCP server).",
     ),
-    sandbox_image: Optional[str] = typer.Option(
+    sandbox_image: str | None = typer.Option(
         None,
         "--sandbox-image",
         help="Use an existing custom Docker sandbox image.",
     ),
-    sandbox_network: Optional[str] = typer.Option(
+    sandbox_network: str | None = typer.Option(
         None,
         "--sandbox-network",
         help="Docker network mode: bridge (default) or none.",
@@ -936,7 +975,7 @@ def main(
         "--ui",
         help="Interactive interface: tui (default) or plain.",
     ),
-    print_prompt: Optional[str] = typer.Option(
+    print_prompt: str | None = typer.Option(
         None, "--print", "-p", help="Run a single prompt, print the reply, and exit."
     ),
     version: bool = typer.Option(
@@ -949,6 +988,8 @@ def main(
     ),
 ) -> None:
     """pion: a minimal, hackable coding agent. No arguments starts the TUI."""
+    if ctx.invoked_subcommand is not None:
+        return
     try:
         config, _ = _load_user_config()
         sandbox_settings = resolve_sandbox_settings(
@@ -975,13 +1016,6 @@ def main(
         err_console.print("\n[dim]Configuration cancelled.[/dim]")
         raise typer.Exit(130) from None
 
-    if sandbox_settings.backend == "off":
-        err_console.print(
-            "[bold red]WARNING: SANDBOX DISABLED.[/bold red] Shell and file tools "
-            "can access the entire host. Project extensions also run with host privileges.",
-            soft_wrap=True,
-        )
-
     try:
         asyncio.run(
             _async_main(
@@ -1001,6 +1035,14 @@ def main(
         # Ctrl-C outside a run (e.g. at the input prompt).
         err_console.print("\n[dim]Interrupted.[/dim]")
         raise typer.Exit(130) from None
+
+
+@app.command("mcp")
+def mcp_command() -> None:
+    """Run the sandbox MCP server on stdio (bash/read/write/edit in Docker)."""
+    from .mcp_server import main as mcp_main
+
+    mcp_main()
 
 
 if __name__ == "__main__":  # pragma: no cover

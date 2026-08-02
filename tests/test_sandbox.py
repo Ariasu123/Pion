@@ -83,7 +83,7 @@ class FakeRuntime(SandboxRuntime):
 def test_sandbox_settings_secure_defaults() -> None:
     settings = PionConfig().sandbox
     assert settings == SandboxSettings()
-    assert settings.backend == "docker"
+    assert settings.backend == "off"
     assert settings.network == "bridge"
     assert settings.memory_mb == 4096
     assert settings.cpus == 2.0
@@ -92,11 +92,15 @@ def test_sandbox_settings_secure_defaults() -> None:
     assert settings.protect_paths == [".env", ".env.*"]
 
 
-def test_build_runtime_selects_docker_or_explicit_host(tmp_path: Path) -> None:
-    docker = build_runtime(SandboxSettings(), tmp_path)
-    host = build_runtime(SandboxSettings(backend="off"), tmp_path)
-    assert docker.backend == "docker"
-    assert docker.guard is not None
+def test_sandbox_settings_migrates_legacy_docker_backend() -> None:
+    settings = SandboxSettings.model_validate({"backend": "docker"})
+    assert settings.backend == "mcp"
+
+
+def test_build_runtime_returns_host(tmp_path: Path) -> None:
+    # Sandboxed execution is mounted via `pion mcp`; build_runtime only
+    # serves the default unsandboxed mode.
+    host = build_runtime(SandboxSettings(), tmp_path)
     assert host.backend == "host"
     assert host.guard is None
 

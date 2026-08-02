@@ -1,9 +1,10 @@
 """pion command line interface.
 
-`pion` starts the full-screen Textual UI, `pion --ui plain` starts the legacy
-REPL, and `pion --print "..."` runs a single prompt and exits. Sessions persist
-as JSONL under ~/.pion/sessions (or a file passed via --session), with automatic
-context compaction when the conversation approaches the model's context window.
+`pion` starts the inline TUI (terminal-native scrollback, differential
+rendering), `pion --ui plain` starts the legacy REPL, and `pion --print "..."`
+runs a single prompt and exits. Sessions persist as JSONL under
+~/.pion/sessions (or a file passed via --session), with automatic context
+compaction when the conversation approaches the model's context window.
 """
 
 from __future__ import annotations
@@ -731,6 +732,7 @@ async def _async_main(
     allow_project_extensions: bool,
     mcp_servers: Optional[dict[str, MCPServerConfig]] = None,
     ui_mode: str = "plain",
+    theme_name: str = "dark",
 ) -> None:
     runtime = build_runtime(sandbox_settings, Path.cwd())
     mcp_manager: Optional[MCPClientManager] = None
@@ -840,9 +842,18 @@ async def _async_main(
         if print_prompt is not None:
             await repl.run_print(print_prompt)
         elif ui_mode == "tui":
-            from .tui import PionApp, TUIStatus
+            from .tui import PionTUI, TUIStatus
+            from .tui.theme import load_theme
 
-            tui = PionApp(
+            try:
+                theme = load_theme(theme_name)
+            except ValueError:
+                err_console.print(
+                    f"[yellow]Unknown theme {escape(theme_name)!r}; "
+                    "falling back to dark.[/yellow]"
+                )
+                theme = load_theme("dark")
+            tui = PionTUI(
                 controller,
                 TUIStatus(
                     project=Path.cwd().name,
@@ -854,6 +865,7 @@ async def _async_main(
                     ),
                     mcp_tools=len(mcp_manager.tools) if mcp_manager is not None else 0,
                 ),
+                theme=theme,
             )
             await tui.run_async()
         else:
@@ -982,6 +994,7 @@ def main(
                 allow_project_extensions,
                 config.mcp_servers,
                 ui_mode,
+                config.theme,
             )
         )
     except KeyboardInterrupt:

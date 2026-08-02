@@ -73,6 +73,7 @@ class PionConfig(BaseModel):
     profiles: dict[str, ProfileConfig] = Field(default_factory=dict)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+    theme: str = "dark"
 
     @model_validator(mode="after")
     def active_profile_exists(self) -> "PionConfig":

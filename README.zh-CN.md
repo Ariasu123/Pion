@@ -16,11 +16,13 @@ Pion 是一个受开源项目 pi agent 启发的轻量、可扩展 Python 编码
 
 ## 终端界面
 
-在交互式终端中运行 `pion`，现在会默认打开基于 Textual 的全屏界面。原有的逐行
-REPL 仍作为低能力终端和故障排查入口保留：
+在交互式终端中运行 `pion` 会打开内联 TUI —— 移植自 pi 架构（`pi-tui`）的自研
+差分渲染界面。它不接管整个屏幕，而是绘制在终端主屏中：对话记录就是你的
+scrollback，退出后会话完整保留。每一帧按行 diff 后在同步输出标记内一次性写入，
+流式输出不会闪烁。原有的逐行 REPL 仍作为低能力终端和故障排查入口保留：
 
 ```text
-pion                         # 全屏 TUI（默认）
+pion                         # 内联 TUI（默认）
 pion --ui tui                # 显式选择 TUI
 pion --ui plain              # 原有逐行 REPL
 pion --print "你的提示词"    # 单次执行后退出，行为不变
@@ -28,35 +30,48 @@ pion --session path.jsonl    # 在 TUI 中恢复指定会话
 ```
 
 交互模式必须运行在 TTY 中。在管道、CI 或其他非 TTY 环境中请使用 `--print`；Pion
-不会尝试绘制全屏界面。对于报告 `TERM=dumb` 的终端，Pion 会回退到 plain 界面。
+不会尝试绘制 TUI。对于报告 `TERM=dumb` 的终端，Pion 会回退到 plain 界面。
 
-中央对话区支持 Markdown 流式更新，工具调用默认显示为折叠卡片。卡片会展示运行
-状态、耗时、参数摘要、输出或错误；MCP 工具还会显示来源服务。手动向上滚动后会
-暂停自动跟随，回到底部时恢复。
+界面遵循 pi 的设计语言：没有窗口边框 —— 结构完全由整行背景色带表达。用户消息
+是深色色带，工具调用按状态着色（pending/success/error），助手文本没有任何装饰，
+底部是两行 dim footer，展示工作目录、会话名、token 用量、成本、上下文压力和当前
+模型。工具输出默认折叠为最后五行，并提示 `... (N earlier lines, ctrl+o to expand)`。
 
 常用键位：
 
 | 键位 | 操作 |
 | --- | --- |
-| `Enter` | 发送编辑器内容 |
-| `Ctrl+J` | 插入换行 |
-| `Esc` | 中断当前生成或分支摘要 |
+| `Enter` | 发送；运行中时排队为下一条消息 |
+| `Alt+Enter` | 排队为 follow-up（所有排队工作之后） |
+| `Alt+Up` | 取回最近一条排队消息到编辑器 |
+| `Ctrl+J` / `Shift+Enter` | 插入换行 |
+| `Esc` | 中断当前生成或分支摘要；关闭浮层 |
+| `Ctrl+O` | 展开/折叠工具输出（tree 内为轮换过滤模式） |
+| `Ctrl+T` | 显示/隐藏 thinking 内容 |
+| `Ctrl+L` | 打开模型选择器 |
 | `Ctrl+P` | 打开命令菜单 |
-| `Ctrl+B` | 切换或聚焦 session tree |
-| `Ctrl+Q` | 退出 Pion |
-| `Ctrl+O` | tree 聚焦时轮换过滤模式 |
+| `Ctrl+B` | 打开 session tree |
+| `Ctrl+Q` / `Ctrl+D`（空编辑器） | 退出 Pion |
 | `Shift+L` | 为选中的 tree entry 设置或清除标签 |
 
-终端宽度不小于 100 列时，session tree 常驻左侧；窄终端中通过覆盖层显示。过滤
-模式包括 `default`、`no-tools`、`user-only`、`labeled-only` 和 `all`。选择 user
-entry 会把 leaf 移到其 parent，并将旧提示词放回编辑器；选择 assistant、tool
-result、compaction 或 branch summary entry 会直接移动到该节点。若切换会放弃当前
-后缀，可以选择不总结、默认总结或提供自定义关注点。摘要生成是事务性的：失败或
-中断不会改变当前分支和 JSONL 文件。
+在行首输入 `/` 会弹出斜杠命令模糊补全；输入 `@` 弹出文件模糊补全。编辑器支持
+提示词历史（首行/末行处按 Up/Down）和 Emacs 风格的词移动与删除键。
 
-TUI 支持 `/help`、`/model`、`/compact`、`/stats`、`/tree`、`/exit` 以及 extension
-注册的命令。v1 可以选择模型；sandbox、MCP 和 profile 仅展示状态，仍通过 CLI 或
-`~/.pion/config.json` 编辑。
+session tree 是覆盖在对话上的模态选择器，对应带分支的 JSONL 会话。过滤模式包括
+`default`、`no-tools`、`user-only`、`labeled-only` 和 `all`。选择 user entry 会把
+leaf 移到其 parent，并将旧提示词放回编辑器；选择 assistant、tool result、
+compaction 或 branch summary entry 会直接移动到该节点。若切换会放弃当前后缀，
+可以选择不总结、默认总结或提供自定义关注点。摘要生成是事务性的：失败或中断不会
+改变当前分支和 JSONL 文件。
+
+主题是移植自 pi 的 JSON 调色板 + 语义色 token，位于 `pion/tui/theme/`。用
+`/theme dark` 或 `/theme light` 切换，或在 `~/.pion/config.json` 中设置
+`"theme": "light"` 持久化。支持 truecolor 的终端使用 24 位色，其余回退到
+xterm-256 调色板。
+
+TUI 支持 `/help`、`/model`、`/compact`、`/stats`、`/tree`、`/theme`、`/exit` 以及
+extension 注册的命令。v1 可以选择模型；sandbox、MCP 和 profile 仅展示状态，仍通过
+CLI 或 `~/.pion/config.json` 编辑。
 
 ## MCP 服务
 

@@ -2,8 +2,6 @@
   <img src="./docs/assets/pion-cover.png" alt="Pion 封面" width="480">
 </p>
 
----
-
 <p align="center">
   <a href="./README.md">English</a> | <strong>中文</strong>
 </p>
@@ -12,76 +10,73 @@
 ![Docker](https://img.shields.io/badge/Docker-Sandbox-2496ED?logo=docker&logoColor=white)
 [![License](https://img.shields.io/badge/License-MIT-69B34C)](./LICENSE)
 
-Pion 是一个受开源项目 pi agent 启发的轻量、可扩展 Python 编码智能体项目；当前为 agent 循环、LLM 提供商、工具、会话和钩子提供基础能力，后续将在此基础上持续进行实验与扩展。
+Pion 是一个受开源项目 pi agent 启发的轻量、可扩展 Python 编码智能体项目；当前为 agent 循环、LLM 提供商、工具、会话和钩子提供基础能力，后续将在此基础上持续进行实验与扩展
 
-## 终端界面
+> **Alpha 阶段：** Pion 正在积极开发中，稳定版本发布前，接口和配置仍可能变化。
 
-在交互式终端中运行 `pion` 会打开内联 TUI —— 移植自 pi 架构（`pi-tui`）的自研
-差分渲染界面。它不接管整个屏幕，而是绘制在终端主屏中：对话记录就是你的
-scrollback，退出后会话完整保留。每一帧按行 diff 后在同步输出标记内一次性写入，
-流式输出不会闪烁。原有的逐行 REPL 仍作为低能力终端和故障排查入口保留：
+- **小而清晰的核心** —— 流式 Agent 循环、并行工具执行和生命周期钩子。
+- **原生终端工作流** —— 内联 TUI 将完整对话保留在终端 scrollback 中。
+- **开放的扩展能力** —— 添加 Python 工具、钩子、斜杠命令或 stdio MCP 服务。
+- **可选隔离执行** —— 通过 MCP 将文件和 shell 工具放入一次性 Docker 沙盒。
 
-```text
-pion                         # 内联 TUI（默认）
-pion --ui tui                # 显式选择 TUI
-pion --ui plain              # 原有逐行 REPL
-pion --print "你的提示词"    # 单次执行后退出，行为不变
-pion --session path.jsonl    # 在 TUI 中恢复指定会话
+## 快速开始
+
+环境要求：Python 3.11+、[uv](https://docs.astral.sh/uv/)，以及用于沙盒执行的可选 Docker。
+
+```bash
+git clone https://github.com/Ariasu123/Pion.git
+cd Pion
+uv sync
+uv run pion --configure
+uv run pion
 ```
 
-交互模式必须运行在 TTY 中。在管道、CI 或其他非 TTY 环境中请使用 `--print`；Pion
-不会尝试绘制 TUI。对于报告 `TERM=dumb` 的终端，Pion 会回退到 plain 界面。
+`--configure` 会将模型配置保存到 `~/.pion/config.json`。你也可以通过环境变量提供内置模型服务的密钥，例如 `DEEPSEEK_API_KEY` 或 `ANTHROPIC_API_KEY`。
 
-界面遵循 pi 的设计语言：没有窗口边框 —— 结构完全由整行背景色带表达。用户消息
-是深色色带，工具调用按状态着色（pending/success/error），助手文本没有任何装饰，
-底部是两行 dim footer，展示工作目录、会话名、token 用量、成本、上下文压力和当前
-模型。工具输出默认折叠为最后五行，并提示 `... (N earlier lines, ctrl+o to expand)`。
+Pion 目前推荐直接从源码运行；本文档不假设项目已经发布到 PyPI。
 
-常用键位：
+> **安全提示：** 默认情况下，Pion 的 `bash`、`read`、`write` 和 `edit` 工具直接在宿主机运行。需要项目级 Docker 隔离时，请使用 `--sandbox mcp`。
 
-| 键位 | 操作 |
+## 架构
+
+```text
+CLI / TUI
+    ↓
+Controller → 会话树 / 上下文压缩
+    ↓
+Agent Loop → LLM Provider
+    ↓
+Tools → Host Runtime 或 MCP → Docker Sandbox
+```
+
+主要扩展点包括：
+
+- **Providers：** OpenAI-compatible Chat Completions 和 Anthropic Messages 适配器。
+- **Tools：** 参数经过类型校验、支持流式更新的 Python 工具。
+- **Hooks：** 可修改上下文、工具调用、工具结果和自定义命令的生命周期中间件。
+- **Sessions：** 支持分支、标签、摘要和压缩的 append-only JSONL 历史。
+
+<details>
+<summary><strong>终端界面快捷键</strong></summary>
+
+| 按键 | 操作 |
 | --- | --- |
-| `Enter` | 发送；运行中时排队为下一条消息 |
-| `Alt+Enter` | 排队为 follow-up（所有排队工作之后） |
-| `Alt+Up` | 取回最近一条排队消息到编辑器 |
-| `Ctrl+J` / `Shift+Enter` | 插入换行 |
-| `Esc` | 中断当前生成或分支摘要；关闭浮层 |
-| `Ctrl+O` | 展开/折叠工具输出（tree 内为轮换过滤模式） |
-| `Ctrl+T` | 显示/隐藏 thinking 内容 |
-| `Ctrl+L` | 打开模型选择器 |
-| `Ctrl+P` | 打开命令菜单 |
-| `Ctrl+B` | 打开 session tree |
-| `Ctrl+Q` / `Ctrl+D`（空编辑器） | 退出 Pion |
-| `Shift+L` | 为选中的 tree entry 设置或清除标签 |
+| `Enter` | 发送；运行中则排队为下一条消息 |
+| `Alt+Enter` / `Alt+Up` | 排队 follow-up / 取回最近的排队消息 |
+| `Ctrl+J` 或 `Shift+Enter` | 插入换行 |
+| `Esc` | 中断当前轮次或关闭选择器 |
+| `Ctrl+O` / `Ctrl+T` | 切换工具输出 / thinking 内容 |
+| `Ctrl+L` / `Ctrl+P` / `Ctrl+B` | 打开模型、命令或会话树选择器 |
+| `Ctrl+Q` | 退出 |
 
-在行首输入 `/` 会弹出斜杠命令模糊补全；输入 `@` 弹出文件模糊补全。编辑器支持
-提示词历史（首行/末行处按 Up/Down）和 Emacs 风格的词移动与删除键。
+输入 `/` 可补全斜杠命令，输入 `@` 可补全文件。内置命令包括 `/help`、`/model`、`/compact`、`/stats`、`/tree`、`/theme` 和 `/exit`。
 
-各类选择器（模型选择、命令菜单、session tree）以编辑器上方的内联下拉面板
-形式打开（Claude Code 风格）。session tree 选择器对应带分支的 JSONL 会话。过滤模式包括
-`default`、`no-tools`、`user-only`、`labeled-only` 和 `all`。选择 user entry 会把
-leaf 移到其 parent，并将旧提示词放回编辑器；选择 assistant、tool result、
-compaction 或 branch summary entry 会直接移动到该节点。若切换会放弃当前后缀，
-可以选择不总结、默认总结或提供自定义关注点。摘要生成是事务性的：失败或中断不会
-改变当前分支和 JSONL 文件。
+</details>
 
-主题是移植自 pi 的 JSON 调色板 + 语义色 token，位于 `pion/tui/theme/`。用
-`/theme dark` 或 `/theme light` 切换，或在 `~/.pion/config.json` 中设置
-`"theme": "light"` 持久化。支持 truecolor 的终端使用 24 位色，其余回退到
-xterm-256 调色板。
+<details>
+<summary><strong>MCP 服务</strong></summary>
 
-TUI 支持 `/help`、`/model`、`/compact`、`/stats`、`/tree`、`/theme`、`/exit` 以及
-extension 注册的命令。v1 可以选择模型；sandbox、MCP 和 profile 仅展示状态，仍通过
-CLI 或 `~/.pion/config.json` 编辑。
-
-## MCP 服务
-
-Pion 内置了基于 stdio 的 [Model Context Protocol](https://modelcontextprotocol.io/)
-客户端。启用的服务会随 Pion 启动，工具会被自动发现，并以
-`<服务名>__<工具名>` 的名称提供给模型。某个服务启动失败时，Pion 会报告并在本次
-运行中禁用它，但不会阻止 Pion 或其他 MCP 服务继续启动。
-
-在 `~/.pion/config.json` 中添加服务：
+在 `~/.pion/config.json` 中添加受信任的 stdio 服务；发现的工具会以 `<服务名>__<工具名>` 暴露。
 
 ```json
 {
@@ -89,102 +84,32 @@ Pion 内置了基于 stdio 的 [Model Context Protocol](https://modelcontextprot
   "mcp_servers": {
     "filesystem": {
       "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "/项目的绝对路径"
-      ],
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/项目的绝对路径"],
       "env": {},
       "enabled": true,
       "timeout_seconds": 30
     }
-  },
-  "active_profile": null,
-  "profiles": {}
-}
-```
-
-`env` 只覆盖该子进程中的同名变量，其余宿主环境变量会被继承。Pion 在 MCP
-启动和关闭错误中会隐藏已配置的环境变量值。超时时间同时用于连接、工具发现和工具
-调用。
-
-stdio MCP 服务是受信任的宿主进程（pion 自带的 `pion mcp` 沙盒服务除外），
-**不会**在 Pion 的 Docker 沙盒中运行，能够访问 Pion 进程可访问的宿主资源。请只
-配置你信任的服务和命令。首版仅支持通过 stdio 使用 MCP tools，暂不提供
-resources、prompts 和 Streamable HTTP。
-
-## 沙盒（以 MCP 方式挂载）
-
-默认情况下 Pion 的 shell 和文件工具**直接在宿主机运行**——不启动 Docker、不启用
-沙盒。沙盒是一项按需挂载的 MCP 能力：
-
-```text
-pion                       # 宿主工具，无沙盒（默认）
-pion --sandbox mcp         # 以 MCP 服务方式挂载 Docker 沙盒
-```
-
-使用 `--sandbox mcp`（或在 `~/.pion/config.json` 中设置 `"sandbox": {"backend":
-"mcp"}`）后，Pion 会启动自带的 `pion mcp` 子进程并像挂载其他 MCP 服务一样挂载它。
-默认工具变为 `sandbox__bash`、`sandbox__read`、`sandbox__write`、`sandbox__edit`，
-宿主机默认工具**不再注册**。Docker 采用失败关闭策略：daemon 不可用时，Pion 会在向
-模型发送请求前退出。
-
-同一个 `pion mcp` 服务也可以被**任意 MCP client**（Claude Code、Cursor 等）挂载：
-
-```json
-{
-  "mcpServers": {
-    "pion-sandbox": { "command": "pion", "args": ["mcp"] }
   }
 }
 ```
 
-Pion 进程本身、模型凭据、配置和会话保留在宿主机上。每个沙盒服务进程会创建一个
-一次性的非 root 容器，并仅将当前项目以相同的绝对路径绑定挂载到容器中。因此，
-项目修改会实时反映到宿主机。Git 元数据默认只读；文件工具无法访问 `.env` 文件，
-容器内对应路径也会被遮蔽；宿主环境变量和 Docker socket 不会注入容器。
+Pion 目前只支持基于 stdio 的 MCP tools，尚不支持 resources、prompts 和 Streamable HTTP。外部 MCP 服务是受信任的宿主进程，不受 Pion Docker 沙盒隔离。
 
-常用选项（会转发给沙盒服务）：
+</details>
 
-```text
---sandbox off|mcp
---sandbox-image IMAGE
---sandbox-network bridge|none
---sandbox-git-write
---allow-project-extensions
-```
+<details>
+<summary><strong>Docker 沙盒</strong></summary>
 
-默认的 `bridge` 网络便于日常开发，但不能阻止源码外泄。处理不可信仓库时，请使用
-`--sandbox-network none`。启用沙盒后，项目级 extension 默认不会加载；只有显式允许
-后才会加载，因为其中的 Python 代码在宿主 Pion 进程中执行，可以绕过沙盒。
-`~/.pion/extensions` 下的用户级 extension 被视为可信宿主代码。
+`uv run pion --sandbox mcp` 会在一次性非 root 容器中启动 Pion 内置 MCP 服务。容器只绑定挂载当前项目；Git 元数据默认只读，`.env` 等受保护文件会被遮蔽，宿主环境变量和 Docker socket 不会注入。
 
-可以在 version 1 配置中保存沙盒默认值：
+常用选项包括 `--sandbox-image IMAGE`、`--sandbox-network bridge|none`、`--sandbox-git-write` 和 `--allow-project-extensions`。默认 bridge 网络允许出站访问；处理不可信仓库时请使用 `--sandbox-network none`。项目 extension 在宿主机执行，因此沙盒模式下默认禁用，除非显式允许。
+
+其他 MCP Client 也可以挂载该沙盒服务：
 
 ```json
-{
-  "version": 1,
-  "sandbox": {
-    "backend": "off",
-    "image": null,
-    "network": "bridge",
-    "memory_mb": 4096,
-    "cpus": 2.0,
-    "pids_limit": 256,
-    "git_write": false,
-    "protect_paths": [".env", ".env.*"]
-  },
-  "active_profile": null,
-  "profiles": {}
-}
+{"mcpServers": {"pion-sandbox": {"command": "uv", "args": ["run", "pion", "mcp"]}}}
 ```
 
-旧的 `"backend": "docker"` 配置会自动迁移为 `"mcp"`——进程内集成的 Docker 路径
-已移除，同一套加固容器引擎现在运行在 `pion mcp` 服务内部。
+</details>
 
-自定义镜像必须已经存在于 Docker 本地，并提供 `sleep` 以及 Agent 所需的工具。
-内置镜像包含 Python 3.12、uv、Bash、Git、ripgrep、curl、CA 证书和基础编译工具。
-
-v1 沙盒面向单用户本地编码 Agent。它能够保护项目之外的宿主资源，但不是多租户
-隔离边界；云端部署应通过 `SandboxRuntime` 接入基于 VM、gVisor、Kata 或
-Firecracker 的运行后端。
+Pion 使用 [MIT License](./LICENSE)，架构和交互方式受到 [pi](https://github.com/earendil-works/pi) 启发。

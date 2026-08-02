@@ -279,6 +279,33 @@ def test_renderer_cursor_marker_positions_cursor():
     assert out.endswith("\x1b[?25h\x1b[?2026l")  # cursor shown before sync end
 
 
+def test_renderer_restores_parked_cursor_before_next_paint():
+    from pion.tui.core import CURSOR_MARKER
+
+    term = FakeTerminal(20, 10)
+    comp = Lines(["ab" + CURSOR_MARKER + "cd", "next"])
+    renderer = InlineRenderer(term, comp)
+    render_sync(renderer)  # cursor ends parked on line 0, 1 row above the end
+    term.written.clear()
+    comp.lines = ["ab" + CURSOR_MARKER + "cd!", "next"]
+    render_sync(renderer)
+    out = term.output()
+    # The paint must first move back down to the frame's last line.
+    assert out.startswith("\x1b[?2026h\x1b[?25l\x1b[1B\r")
+
+
+def test_renderer_close_restores_cursor_position():
+    from pion.tui.core import CURSOR_MARKER
+
+    term = FakeTerminal(20, 10)
+    comp = Lines(["ab" + CURSOR_MARKER + "cd", "next"])
+    renderer = InlineRenderer(term, comp)
+    render_sync(renderer)
+    term.written.clear()
+    renderer.close()
+    assert term.output().startswith("\x1b[1B\r\r\n")
+
+
 def test_renderer_overlay_composites():
     term = FakeTerminal(20, 10)
     base = Lines(["base one", "base two", "base three"])

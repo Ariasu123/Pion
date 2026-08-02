@@ -49,6 +49,10 @@ class InlineRenderer:
         self._closed = False
         self._force_clear = False
         self.cursor: tuple[int, int] | None = None  # (row, col) in the frame
+        # Rows the hardware cursor is parked above the frame's last line
+        # (after _position_cursor moved it to the editor's fake cursor).
+        # Every paint must first restore the "cursor at frame end" invariant.
+        self._parked_above_end = 0
 
     # -- scheduling -----------------------------------------------------
 
@@ -84,8 +88,21 @@ class InlineRenderer:
         if self._closed:
             return
         if self._prev_lines is not None:
-            self.terminal.write("\r\n" + _SHOW_CURSOR)
+            self.terminal.write(self._restore_cursor() + "\r\n" + _SHOW_CURSOR)
         self._closed = True
+
+    def _restore_cursor(self) -> str:
+        """Move the hardware cursor back to the frame's last line.
+
+        After `_position_cursor` parked the cursor at the editor's fake
+        cursor, every paint (and close) must first undo that move — all
+        diff arithmetic assumes the cursor is at the end of the last line.
+        """
+        if self._parked_above_end:
+            out = f"\x1b[{self._parked_above_end}B\r"
+            self._parked_above_end = 0
+            return out
+        return ""
 
     # -- frame production ------------------------------------------------
 
@@ -127,7 +144,7 @@ class InlineRenderer:
         lines = self._render_frame()
         prev = self._prev_lines
 
-        buf: list[str] = [_SYNC_START, _HIDE_CURSOR]
+        buf: list[str] = [_SYNC_START, _HIDE_CURSOR, self._restore_cursor()]
         if prev is None or self._prev_width != width:
             if self._force_clear:
                 # Width changed: clear screen + scrollback and repaint.
@@ -209,6 +226,7 @@ class InlineRenderer:
         # Cursor is now at the end of the new last line.
 
     def _position_cursor(self, lines: list[str]) -> str:
+        self._parked_above_end = 0
         if self.cursor is None or not lines:
             return ""
         row, col = self.cursor
@@ -219,4 +237,5 @@ class InlineRenderer:
             out += f"\x1b[{up}A"
         if col:
             out += f"\x1b[{col}C"
+        self._parked_above_end = up
         return out + _SHOW_CURSOR

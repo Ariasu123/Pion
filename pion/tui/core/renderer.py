@@ -205,6 +205,14 @@ class InlineRenderer:
             buf.append(lines[i])
             if i < new_n - 1:
                 buf.append("\r\n")
+        # When unchanged tail lines were preserved below the rewritten
+        # region, the loop above left the cursor on the row below the last
+        # rewritten line. Move down to the new last line to restore the
+        # "cursor at frame end" invariant.
+        if new_changed_end < new_n:
+            down = (new_n - 1) - new_changed_end
+            if down > 0:
+                buf.append(f"\x1b[{down}B")
 
         # Clear leftover lines when the frame shrank.
         leftover = old_changed_end - new_changed_end

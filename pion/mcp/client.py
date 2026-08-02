@@ -23,9 +23,9 @@ from mcp import types as mcp_types
 from mcp.client.stdio import stdio_client
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from .config import MCPServerConfig
-from .llm.types import ImageContent, TextContent, sanitize_text
-from .tools.base import AgentToolResult, OnUpdate
+from ..config import MCPServerConfig
+from ..llm.types import ImageContent, TextContent, sanitize_text
+from ..tools.base import AgentToolResult, OnUpdate
 
 
 class MCPToolArguments(BaseModel):

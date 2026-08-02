@@ -27,16 +27,16 @@ from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-from . import __version__
-from .config import load_config
-from .sandbox import (
+from .. import __version__
+from ..config import load_config
+from ..sandbox import (
     DockerSandboxRuntime,
     HostSandboxRuntime,
     SandboxRuntime,
     SandboxSettings,
 )
-from .tools import build_default_tools
-from .tools.base import AgentToolResult, ToolCallError, validate_arguments
+from ..tools import build_default_tools
+from ..tools.base import AgentToolResult, ToolCallError, validate_arguments
 
 
 def resolve_server_settings() -> SandboxSettings:

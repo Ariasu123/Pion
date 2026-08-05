@@ -21,21 +21,38 @@ Pion 是一个受开源项目 pi agent 启发的轻量、可扩展 Python 编码
 
 ## 快速开始
 
-环境要求：Python 3.11+、[uv](https://docs.astral.sh/uv/)，以及用于沙盒执行的可选 Docker。
+一键安装器支持 macOS 和 Linux。缺少 [uv](https://docs.astral.sh/uv/) 时会自动安装，uv 随后会提供兼容的 Python 运行时。Docker 是可选依赖，仅在沙盒执行时需要。
 
 ```bash
-git clone https://github.com/Ariasu123/Pion.git
-cd Pion
-uv sync
-uv run pion --configure
-uv run pion
+curl -LsSf https://raw.githubusercontent.com/Ariasu123/Pion/main/install.sh | sh
+```
+
+安装完成后重启终端，然后配置并启动 Pion：
+
+```bash
+pion --configure
+pion
 ```
 
 `--configure` 会将模型配置保存到 `~/.pion/config.json`。你也可以通过环境变量提供内置模型服务的密钥，例如 `DEEPSEEK_API_KEY` 或 `ANTHROPIC_API_KEY`。
 
-Pion 目前推荐直接从源码运行；本文档不假设项目已经发布到 PyPI。
+在任意项目目录运行 `pion`，该目录就会成为 Agent 工作区。重新执行安装命令可升级到最新稳定版；使用 `uv tool uninstall pion` 可卸载。需要固定版本时，将安装器传给 `PION_VERSION=v0.1.0 sh`。
 
 > **安全提示：** 默认情况下，Pion 的 `bash`、`read`、`write` 和 `edit` 工具直接在宿主机运行。需要项目级 Docker 隔离时，请使用 `--sandbox mcp`。
+
+<details>
+<summary><strong>从源码进行开发安装</strong></summary>
+
+```bash
+git clone https://github.com/Ariasu123/Pion.git
+cd Pion
+uv sync --group dev
+uv tool install --editable . --force
+```
+
+Editable 安装会让全局 `pion` 命令直接引用这个源码目录，因此修改代码后无需重新安装即可生效。移动或删除该目录后，需要重新安装才能继续使用命令。
+
+</details>
 
 ## 架构
 

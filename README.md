@@ -21,21 +21,38 @@ Pion is a lightweight, extensible Python coding agent inspired by the open-sourc
 
 ## Quick start
 
-Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), and optionally Docker for sandboxed execution.
+The one-line installer supports macOS and Linux. It installs [uv](https://docs.astral.sh/uv/) when needed; uv then provides a compatible Python runtime. Docker is optional and only required for sandboxed execution.
 
 ```bash
-git clone https://github.com/Ariasu123/Pion.git
-cd Pion
-uv sync
-uv run pion --configure
-uv run pion
+curl -LsSf https://raw.githubusercontent.com/Ariasu123/Pion/main/install.sh | sh
+```
+
+Restart your terminal after installation, then configure and start Pion:
+
+```bash
+pion --configure
+pion
 ```
 
 `--configure` saves a model profile in `~/.pion/config.json`. You can also provide a built-in provider key through its environment variable, such as `DEEPSEEK_API_KEY` or `ANTHROPIC_API_KEY`.
 
-Pion is currently intended to be run from source; this README does not assume a published PyPI package.
+Run `pion` from any project directory; that directory becomes the agent workspace. Rerun the installer to upgrade to the latest stable release, or remove Pion with `uv tool uninstall pion`. To install a specific release, pipe the installer into `PION_VERSION=v0.1.0 sh`.
 
 > **Security:** By default, Pion's `bash`, `read`, `write`, and `edit` tools run directly on the host. Use `--sandbox mcp` when you want project-scoped Docker isolation.
+
+<details>
+<summary><strong>Development install from source</strong></summary>
+
+```bash
+git clone https://github.com/Ariasu123/Pion.git
+cd Pion
+uv sync --group dev
+uv tool install --editable . --force
+```
+
+The editable install makes the global `pion` command use this checkout directly, so source changes take effect without reinstalling. Moving or deleting the checkout breaks that command until it is reinstalled.
+
+</details>
 
 ## Architecture
 

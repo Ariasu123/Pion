@@ -38,8 +38,8 @@ dev = [
 pion = "pion.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/your-name/pion"
-Repository = "https://github.com/your-name/pion"
+Homepage = "https://github.com/Ariasu123/Pion"
+Repository = "https://github.com/Ariasu123/Pion"
 
 [build-system]
 requires = ["hatchling"]

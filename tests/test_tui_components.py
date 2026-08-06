@@ -41,7 +41,7 @@ def test_box_pads_children_with_bg():
     lines = box.render(16)
     assert len(lines) == 3
     assert all(visible_width(line) == 16 for line in lines)
-    assert all("\x1b[48;2;40;50;40m" in line for line in lines)
+    assert all("\x1b[48;2;40;40;50m" in line for line in lines)
 
 
 def test_dynamic_border():
@@ -63,6 +63,15 @@ def test_markdown_basic_and_width():
     lines = md.render(50)
     plain = "\n".join(strip_ansi(line) for line in lines)
     assert "Title" in plain and "bold" in plain
+    assert all(visible_width(line) <= 50 for line in lines)
+
+
+def test_markdown_wraps_long_cjk_paragraph():
+    # One long unbroken CJK paragraph must be folded to width, never exceed it.
+    text = "已读完。这是一份关于大模型推理引擎方向的调研报告，" * 10
+    md = Markdown(text, theme=THEME)
+    lines = md.render(50)
+    assert len(lines) > 1
     assert all(visible_width(line) <= 50 for line in lines)
 
 

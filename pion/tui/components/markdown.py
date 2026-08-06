@@ -15,7 +15,7 @@ from rich.markdown import Markdown as RichMarkdown
 from rich.theme import Theme as RichTheme
 
 from ..core.component import Component
-from ..core.text_utils import pad_line, repaint
+from ..core.text_utils import pad_line, repaint, truncate_to_width
 from ..theme import Theme, get_theme
 
 
@@ -102,7 +102,7 @@ class Markdown(Component):
             legacy_windows=False,
             soft_wrap=False,
         )
-        console.print(RichMarkdown(text, code_theme="ansi_dark"), soft_wrap=True)
+        console.print(RichMarkdown(text, code_theme="ansi_dark"))
         lines = buffer.getvalue().split("\n")
         # Rich pads lines to full width with spaces; trim trailing blanks.
         lines = [line.rstrip() for line in lines]
@@ -126,7 +126,7 @@ class Markdown(Component):
         if prefix:
             lines = [repaint(line, prefix) for line in lines]
         pad = " " * self.pad_x
-        out = [pad + pad_line(line, inner) + pad for line in lines]
+        out = [pad + pad_line(truncate_to_width(line, inner), inner) + pad for line in lines]
         out = [""] * self.pad_y + out + [""] * self.pad_y
         self._cache = (width, out)
         return list(out)

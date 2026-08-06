@@ -17,7 +17,7 @@ from pion.tui.theme import load_theme
 
 THEME = load_theme("dark", truecolor=True)
 USER_BG = "\x1b[48;2;52;53;65m"  # userMsgBg #343541
-SUCCESS_BG = "\x1b[48;2;40;50;40m"  # toolSuccessBg #283228
+SUCCESS_BG = "\x1b[48;2;40;40;50m"  # toolSuccessBg #282832
 ERROR_BG = "\x1b[48;2;60;40;40m"  # toolErrorBg #3c2828
 
 

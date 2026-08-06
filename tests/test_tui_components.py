@@ -41,7 +41,7 @@ def test_box_pads_children_with_bg():
     lines = box.render(16)
     assert len(lines) == 3
     assert all(visible_width(line) == 16 for line in lines)
-    assert all("\x1b[48;2;40;40;50m" in line for line in lines)
+    assert all("\x1b[48;2;40;50;40m" in line for line in lines)
 
 
 def test_dynamic_border():

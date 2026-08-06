@@ -1,8 +1,8 @@
 """Chat transcript components (port of pi-coding-agent's message components).
 
 Structure follows pi: user messages are full-width background bands, tool
-executions are state-tinted bands, assistant text has no chrome at all, and
-blocks are separated by a one-line rhythm.
+executions are bare text blocks (errors in red), assistant text has no
+chrome at all, and blocks are separated by a one-line rhythm.
 """
 
 from __future__ import annotations
@@ -122,7 +122,7 @@ class AssistantMessageComponent(Container):
 
 
 class ToolExecutionComponent(Container):
-    """State-tinted background band: pending / success / error."""
+    """Tool call block: bold title + dim output; errors render in red."""
 
     def __init__(
         self,
@@ -170,7 +170,7 @@ class ToolExecutionComponent(Container):
             title = theme.styled(self.tool_name, "toolTitle", bold=True)
             summary = self._summary()
             if summary:
-                title += " " + theme.fg("muted", summary)
+                title += " " + theme.fg("accent", summary)
         if "__" in self.tool_name:
             server = self.tool_name.split("__", 1)[0]
             title += " " + theme.fg("dim", f"(mcp {server})")
@@ -178,28 +178,31 @@ class ToolExecutionComponent(Container):
 
     def render(self, width: int) -> list[str]:
         theme = self._theme or get_theme()
-        if self.running:
-            bg = "toolPendingBg"
-        elif self.is_error:
-            bg = "toolErrorBg"
-        else:
-            bg = "toolSuccessBg"
-
         inner = max(8, width - 2)
         lines = [truncate_to_width(self._title(theme), inner)]
 
-        output = self.result_text.rstrip("\n")
+        # Tabs count as 0 cells for wcwidth but expand to tab stops in the
+        # terminal; replace them so physical width never exceeds the measure.
+        output = self.result_text.rstrip("\n").replace("\t", "   ")
         if output:
             output_lines = output.split("\n")
-            if not self._expanded() and len(output_lines) > PREVIEW_LINES:
-                skipped = len(output_lines) - PREVIEW_LINES
+            # Like pi: read output stays hidden while collapsed (unless error).
+            if self.tool_name == "read" and not self.is_error and not self._expanded():
                 hint = theme.fg(
-                    "dim", f"… ({skipped} earlier lines, ctrl+o to expand)"
+                    "dim", f"… ({len(output_lines)} lines, ctrl+o to expand)"
                 )
                 lines.append(hint)
-                output_lines = output_lines[-PREVIEW_LINES:]
-            for line in output_lines:
-                lines.append(theme.fg("toolOutput", truncate_to_width(line, inner)))
+            else:
+                if not self._expanded() and len(output_lines) > PREVIEW_LINES:
+                    skipped = len(output_lines) - PREVIEW_LINES
+                    hint = theme.fg(
+                        "dim", f"… ({skipped} earlier lines, ctrl+o to expand)"
+                    )
+                    lines.append(hint)
+                    output_lines = output_lines[-PREVIEW_LINES:]
+                output_fg = "error" if self.is_error else "toolOutput"
+                for line in output_lines:
+                    lines.append(theme.fg(output_fg, truncate_to_width(line, inner)))
 
         if self.running:
             elapsed = time.monotonic() - self.started_at
@@ -207,7 +210,7 @@ class ToolExecutionComponent(Container):
         elif self.duration is not None:
             lines.append(theme.fg("dim", f"Took {self.duration:.1f}s"))
 
-        box = Box(1, 1, bg=bg, children=[_RawLines(lines)], theme=theme)
+        box = Box(1, 1, children=[_RawLines(lines)], theme=theme)
         return [""] + box.render(width)
 
 

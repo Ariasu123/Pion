@@ -11,14 +11,14 @@ from pion.llm.types import AssistantMessage, TextContent, ThinkingContent
 from pion.session import SessionManager
 from pion.tui import PionTUI, TUIStatus
 from pion.tui.app.chat import AssistantMessageComponent, ToolExecutionComponent
-from pion.tui.core import FakeTerminal, strip_ansi
+from pion.tui.core import FakeTerminal, strip_ansi, visible_width
 from pion.tui.core.renderer import CURSOR_MARKER
 from pion.tui.theme import load_theme
 
 THEME = load_theme("dark", truecolor=True)
 USER_BG = "\x1b[48;2;52;53;65m"  # userMsgBg #343541
-SUCCESS_BG = "\x1b[48;2;40;40;50m"  # toolSuccessBg #282832
-ERROR_BG = "\x1b[48;2;60;40;40m"  # toolErrorBg #3c2828
+SUCCESS_BG = "\x1b[48;2;40;50;40m"  # toolSuccessBg #283228 (unused: tool blocks have no band)
+ERROR_FG = "\x1b[38;2;204;102;102m"  # error #cc6666
 
 
 def make_tui(tmp_path, scripts, tools=None, columns=80, rows=24):
@@ -96,12 +96,12 @@ async def test_tool_card_lifecycle(tmp_path):
     out = terminal.output()
     assert "echo" in out and "ping" in out
     assert "echo:ping" in out  # tool output
-    assert SUCCESS_BG in out
+    assert SUCCESS_BG not in out  # no background band on tool blocks
     assert "Took" in out
     await stop_tui(tui, task)
 
 
-async def test_tool_card_error_tint(tmp_path):
+async def test_tool_card_error_text_is_red(tmp_path):
     class FailingTool(EchoTool):
         async def execute(self, tool_call_id, args, abort=None, on_update=None):
             raise RuntimeError("boom")
@@ -117,7 +117,7 @@ async def test_tool_card_error_tint(tmp_path):
     task = await run_tui(tui)
     terminal.feed(b"go\r")
     await settle()
-    assert ERROR_BG in terminal.output()
+    assert ERROR_FG in terminal.output()
     await stop_tui(tui, task)
 
 
@@ -354,3 +354,38 @@ def test_tool_component_mcp_source():
     rendered = plain(component.render(70))
     assert "mcp weather" in rendered
     assert "sunny" in rendered
+
+
+def test_tool_output_tabs_are_expanded():
+    # Tabs measure 0 cells for wcwidth but expand to tab stops in a real
+    # terminal; they must never reach the rendered frame.
+    component = ToolExecutionComponent(
+        "c1", "bash", {"command": "cat"}, lambda: False, theme=THEME
+    )
+    component.update_result("1\tsome\tindented line\n2\t" + "x" * 200, False)
+    lines = component.render(70)
+    assert all("\t" not in strip_ansi(line) for line in lines)
+    assert all(visible_width(line) <= 70 for line in lines)
+
+
+def test_read_output_hidden_when_collapsed():
+    long_output = "\n".join(f"{i}\tline {i}" for i in range(1, 21))
+    collapsed = ToolExecutionComponent(
+        "c1", "read", {"path": "/tmp/a.md"}, lambda: False, theme=THEME
+    )
+    collapsed.update_result(long_output, False)
+    rendered = plain(collapsed.render(70))
+    assert "line 10" not in rendered
+    assert "20 lines, ctrl+o to expand" in rendered
+
+    expanded = ToolExecutionComponent(
+        "c2", "read", {"path": "/tmp/a.md"}, lambda: True, theme=THEME
+    )
+    expanded.update_result(long_output, False)
+    assert "line 10" in plain(expanded.render(70))
+
+    errored = ToolExecutionComponent(
+        "c3", "read", {"path": "/tmp/a.md"}, lambda: False, theme=THEME
+    )
+    errored.update_result("Error: file not found: /tmp/a.md", True)
+    assert "file not found" in plain(errored.render(70))

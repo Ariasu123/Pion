@@ -17,7 +17,7 @@ Pion is a lightweight, extensible Python coding agent inspired by the open-sourc
 - **Small, readable core** — a streamed agent loop with parallel tool execution and hooks.
 - **Terminal-native workflow** — an inline TUI that keeps the conversation in your scrollback.
 - **Open extension surface** — add Python tools, lifecycle hooks, slash commands, or stdio MCP servers.
-- **Optional isolation** — run file and shell tools in a disposable Docker sandbox mounted through MCP.
+- **Optional isolation** — run file and shell tools through the standalone [sandbox-docker-mcp](https://github.com/Ariasu123/Agent-Toolkit/tree/main/Personal/MCP-Hub/sandbox-docker-mcp) package.
 
 ## Quick start
 
@@ -117,7 +117,7 @@ Pion currently supports MCP tools over stdio, not resources, prompts, or Streama
 <details>
 <summary><strong>Docker sandbox</strong></summary>
 
-`uv run pion --sandbox mcp` starts Pion's built-in MCP server in a disposable, non-root container. Only the current project is bind-mounted; Git metadata is read-only by default, protected files such as `.env` are masked, and host environment variables and the Docker socket are not injected.
+`uv run pion --sandbox mcp` starts the independently maintained [sandbox-docker-mcp](https://github.com/Ariasu123/Agent-Toolkit/tree/main/Personal/MCP-Hub/sandbox-docker-mcp) server through Pion's compatibility entry point. It runs in a disposable, non-root container. Only the current project is bind-mounted; Git metadata is read-only by default, protected files such as `.env` are masked, and host environment variables and the Docker socket are not injected.
 
 Useful options: `--sandbox-image IMAGE`, `--sandbox-network bridge|none`, `--sandbox-git-write`, and `--allow-project-extensions`. The default bridge network permits outbound access; use `--sandbox-network none` for untrusted repositories. Project extensions execute on the host and are disabled in sandbox mode unless explicitly allowed.
 

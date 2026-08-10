@@ -1,4 +1,4 @@
-"""Sandbox policy and runtime backends."""
+"""Pion sandbox policy, host runtime and standalone-package adapters."""
 
 from __future__ import annotations
 

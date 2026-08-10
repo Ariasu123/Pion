@@ -23,6 +23,7 @@ dependencies = [
     "pydantic>=2.6",
     "typer>=0.12",
     "rich>=13.7",
+    "sandbox-docker-mcp @ git+https://github.com/Ariasu123/Agent-Toolkit.git@006b345b3cd9edbc1ed7453873bf9403d5d7495d#subdirectory=Personal/MCP-Hub/sandbox-docker-mcp",
     "wcwidth>=0.8.2",
 ]
 
@@ -44,6 +45,9 @@ Repository = "https://github.com/Ariasu123/Pion"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["pion"]

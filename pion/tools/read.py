@@ -108,8 +108,21 @@ class ReadTool:
             )
 
         lines = text.split("\n")
-        total_lines = len(lines)
-
+        total_lines = len(lines)        
+        # offset is 1-indexed; 0 is invalid and would otherwise silently
+        # select the last line via lines[-1:].
+        if args.offset == 0:
+            return AgentToolResult.text(
+                "Error: offset is 1-indexed; use offset=1 for the first line "
+                "(negative values read from the end of the file)",
+                details=self._details(
+                    {
+                        "truncated": False,
+                        "linesReturned": 0,
+                        "totalLines": total_lines,
+                    }
+                ),
+            )
         # Convert 1-indexed offset to a 0-indexed start. Negative offset: from the end.
         if args.offset < 0:
             start = max(0, total_lines + args.offset)
@@ -154,7 +167,7 @@ class ReadTool:
         output = "\n".join(out_lines)
         first_display = start + 1
         last_display = start + len(out_lines)
-        if last_display < total_lines:
+        if out_lines and last_display < total_lines:
             note = f"[Showing lines {first_display}-{last_display} of {total_lines}. Use offset={last_display + 1} to continue.]"
             output = f"{output}\n\n{note}" if output else note
 

@@ -68,6 +68,24 @@ async def test_read_offset_beyond_eof(tmp_path):
     assert result.details["linesReturned"] == 0
 
 
+async def test_read_offset_zero_is_an_error(tmp_path):
+    f = tmp_path / "zero.txt"
+    f.write_text("a\nb\nc\nd")
+    result = await READ_TOOL.execute("t7", ReadArgs(path=str(f), offset=0))
+    text = text_of(result)
+    assert "1-indexed" in text
+    assert result.details["linesReturned"] == 0
+
+
+async def test_read_limit_zero_has_no_bogus_note(tmp_path):
+    f = tmp_path / "lim.txt"
+    f.write_text("a\nb\nc\nd")
+    result = await READ_TOOL.execute("t8", ReadArgs(path=str(f), limit=0))
+    text = text_of(result)
+    assert result.details["linesReturned"] == 0
+    assert "1-0" not in text
+
+
 async def test_read_not_found(tmp_path):
     result = await READ_TOOL.execute("t6", ReadArgs(path=str(tmp_path / "nope.txt")))
     assert "not found" in text_of(result)

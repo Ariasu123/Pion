@@ -124,3 +124,42 @@ async def test_controller_observer_error_does_not_break_prompt(tmp_path: Path) -
     final = await controller.prompt("prompt")
     assert final.text() == "answer"
     assert len(controller.subscriber_errors) >= 1
+
+
+async def test_prompt_resets_last_error_on_success(tmp_path: Path) -> None:
+    controller = _controller(tmp_path, [{"text": "answer"}])
+    controller.last_error = "stale error from a previous turn"
+    await controller.prompt("hi")
+    # A clean turn must clear a stale error rather than leaving it stuck.
+    assert controller.last_error is None
+
+
+async def test_prompt_records_agent_error(tmp_path: Path) -> None:
+    controller = _controller(
+        tmp_path,
+        [{"stop_reason": "error", "error_message": "boom"}],
+    )
+    await controller.prompt("hi")
+    assert controller.last_error == "boom"
+
+
+async def test_compaction_failure_still_emits_finished(tmp_path: Path) -> None:
+    controller = _controller(
+        tmp_path,
+        [{"stop_reason": "error", "error_message": "summary failed"}],
+    )
+    controller.session.append_message(_user("prompt"))
+    controller.session.append_message(_assistant("answer"))
+    controller.agent.messages = controller.session.build_context()
+
+    events: list[str] = []
+    controller.subscribe(lambda e: events.append(e.type))
+
+    with pytest.raises(RuntimeError, match="summary failed"):
+        await controller.maybe_compact(force=True)
+
+    # compaction_started must always be paired with compaction_finished so the
+    # UI spinner can't hang when summarization fails.
+    assert "compaction_started" in events
+    assert "compaction_finished" in events
+    assert controller._compacting is False

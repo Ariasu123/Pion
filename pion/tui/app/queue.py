@@ -29,11 +29,17 @@ class MessageQueue:
         return None
 
     def pop_back(self) -> str | None:
-        """Alt+Up: take the most recent queued message back to the editor."""
-        if self.steer:
-            return self.steer.pop()
+        """Alt+Up: take the most recent queued message back to the editor.
+
+        This mirrors ``pop_next``: since messages are sent steer-first then
+        followup, the *last* one that would be sent lives at the tail of
+        ``followup`` (or of ``steer`` when there are no follow-ups). Popping in
+        that order returns the genuinely most-recently-queued message.
+        """
         if self.followup:
             return self.followup.pop()
+        if self.steer:
+            return self.steer.pop()
         return None
 
     def __len__(self) -> int:

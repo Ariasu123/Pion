@@ -113,6 +113,22 @@ def test_long_line_wraps_without_overflow():
     )
 
 
+def test_cursor_at_width_boundary_does_not_overflow():
+    # A line whose length is an exact multiple of the width leaves the cursor at
+    # the end of a *full* wrapped segment. Appending a cursor cell there would
+    # push the rendered line to width+1 and raise RenderError at draw time.
+    for width in (20, 40, 80):
+        editor = make_editor()
+        type_text(editor, "x" * width)
+        assert editor.cursor_col == width
+        lines = editor.render(width)
+        assert all(
+            visible_width(line.replace(CURSOR_MARKER, "")) <= width for line in lines
+        )
+        # The cursor still renders — pinned on a fresh line at the boundary.
+        assert any(CURSOR_MARKER in line for line in lines)
+
+
 def test_autocomplete_flow(tmp_path):
     provider = CombinedAutocompleteProvider(
         [SlashCommand("tree", "session tree"), SlashCommand("stats", "usage")],

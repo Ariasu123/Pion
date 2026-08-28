@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from ..core.component import Component
 from ..core.keys import KeyEvent
-from ..core.text_utils import apply_bg, pad_line, truncate_to_width
+from ..core.text_utils import apply_bg, pad_line, truncate_to_width, visible_width
 from ..theme import Theme, get_theme
 from .fuzzy import fuzzy_filter
 
@@ -104,7 +104,7 @@ class SelectList(Component):
             marker = theme.fg("accent", "> ") if start + index == self.selected else "  "
             line = marker + truncate_to_width(item.label, max(1, width - 4))
             if item.description:
-                room = width - 4 - len(item.label)
+                room = width - 4 - visible_width(item.label)
                 if room > 6:
                     line += "  " + theme.fg(
                         "description", truncate_to_width(item.description, room - 2)

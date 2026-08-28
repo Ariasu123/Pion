@@ -269,6 +269,28 @@ async def test_footer_context_percent_uses_real_usage(tmp_path):
     assert "1%/128.0k" in rendered
 
 
+async def test_footer_line2_clamps_to_narrow_width(tmp_path):
+    # A model id wider than the terminal must be clamped: line2 must never
+    # exceed width or the renderer raises RenderError and the redraw dies.
+    tui, terminal, _ = make_tui(tmp_path, [{"text": "hi"}])
+    for width in (4, 8, 12):
+        line2 = tui.footer.render(width)[-1]
+        assert visible_width(line2) <= width
+
+
+def test_message_queue_pop_back_returns_most_recently_queued():
+    from pion.tui.app.queue import MessageQueue
+
+    queue = MessageQueue()
+    queue.enqueue_steer("steer-1")
+    queue.enqueue_followup("followup-1")
+    # Send order is steer then followup, so the most recently queued (last to be
+    # sent) message is the follow-up; pop_back must return it before the steer.
+    assert queue.pop_back() == "followup-1"
+    assert queue.pop_back() == "steer-1"
+    assert queue.pop_back() is None
+
+
 async def test_tree_navigation_prefills_editor(tmp_path):
     tui, terminal, _ = make_tui(
         tmp_path, [{"text": "reply one"}, {"text": "reply two"}]

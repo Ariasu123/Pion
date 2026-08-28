@@ -6,6 +6,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+# The Docker sandbox adapter lives in the optional `sandbox` extra; skip the
+# whole module (rather than fail at collection) when it isn't installed — CI's
+# default env is extra-free on purpose, to regression-test the decoupling.
+pytest.importorskip("sandbox_docker_mcp")
+
 from sandbox_docker_mcp import (
     DockerSandboxRuntime as ExternalDockerSandboxRuntime,
 )

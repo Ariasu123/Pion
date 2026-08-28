@@ -182,15 +182,10 @@ async def _async_main(
     mcp_manager: MCPClientManager | None = None
     try:
         if sandbox_backend == "mcp":
-            try:
-                # Fail before constructing the Agent or issuing any model request.
-                await _cli.check_docker_available()
-            except SandboxError as exc:
-                err_console.print(
-                    f"[red]Sandbox startup failed:[/red] {escape(str(exc))}",
-                    soft_wrap=True,
-                )
-                raise typer.Exit(1) from exc
+            # The Docker preflight now runs inside the `pion mcp` server child,
+            # which owns the optional sandbox_docker_mcp dependency; the main
+            # process never imports it. A sandbox server that fails to start is
+            # caught after the MCP manager connects, below.
             if sandbox_settings.network == "bridge":
                 err_console.print(
                     "[yellow]Sandbox notice:[/yellow] Docker bridge networking is enabled; "
@@ -280,6 +275,23 @@ async def _async_main(
             )
         else:
             default_tools = build_default_tools(runtime)
+
+        if sandbox_backend == "mcp" and (
+            mcp_manager is None
+            or "sandbox" not in mcp_manager.connected_server_names
+        ):
+            # In MCP mode the sandbox server is the only source of tools; if it
+            # failed to start (Docker down, or the sandbox extra not installed —
+            # the reason is printed above), fail fast instead of running the
+            # agent with no tools.
+            err_console.print(
+                "[red]Sandbox startup failed:[/red] the sandbox MCP server "
+                "(`pion mcp`) did not start; see the error above. Ensure Docker "
+                "is running and the sandbox extra is installed: "
+                "pip install 'pion[sandbox] @ git+<repo-url>'.",
+                soft_wrap=True,
+            )
+            raise typer.Exit(1)
 
         # Session: resume an existing JSONL file, or start a new one.
         if session_path is not None and session_path.exists():

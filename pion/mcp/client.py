@@ -270,6 +270,11 @@ class MCPClientManager:
     def connected_server_count(self) -> int:
         return len(self.connections)
 
+    @property
+    def connected_server_names(self) -> set[str]:
+        """Names of servers that finished startup (failed ones are excluded)."""
+        return {connection.name for connection in self.connections}
+
     async def start(self, reserved_tool_names: set[str] | None = None) -> None:
         used_names = set(reserved_tool_names or ())
         for name, config in self.servers.items():

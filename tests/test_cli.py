@@ -7,6 +7,7 @@ pure helpers factored out of the REPL. No network, no interactive REPL.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from datetime import datetime
 
@@ -526,6 +527,9 @@ async def test_sandbox_controls_project_extension_search(
             self.tools = []
             self.errors = []
             self.connected_server_count = 1
+            # The mounted sandbox server "connects" so the mcp-backend
+            # fail-fast (no sandbox tools) is not triggered here.
+            self.connected_server_names = set(servers)
 
         async def start(self, reserved):
             pass
@@ -540,11 +544,7 @@ async def test_sandbox_controls_project_extension_search(
         async def run_print(self, text):
             return None
 
-    async def noop_docker_check():
-        return None
-
     monkeypatch.setattr(cli, "build_runtime", lambda settings, workspace: runtime)
-    monkeypatch.setattr(cli, "check_docker_available", noop_docker_check)
     monkeypatch.setattr(cli, "MCPClientManager", FakeMCPManager)
     monkeypatch.setattr(cli, "extension_dirs", capture_extension_dirs)
     monkeypatch.setattr(cli, "Repl", NoopRepl)
@@ -619,15 +619,15 @@ async def test_async_startup_mcp_backend_mounts_internal_sandbox(
 ) -> None:
     seen = {}
 
-    async def fake_docker_check():
-        seen["preflight"] = True
-
     class FakeMCPManager:
         def __init__(self, servers):
             seen["servers"] = servers
             self.tools = []
             self.errors = []
             self.connected_server_count = 1
+            # The sandbox server connected: the child owns the Docker preflight
+            # now, so the main process only checks that it came up.
+            self.connected_server_names = set(servers)
 
         async def start(self, reserved):
             seen["reserved"] = reserved
@@ -646,7 +646,6 @@ async def test_async_startup_mcp_backend_mounts_internal_sandbox(
         raise AssertionError("mcp backend must not build a host runtime")
 
     monkeypatch.setattr(cli, "build_runtime", fail_build_runtime)
-    monkeypatch.setattr(cli, "check_docker_available", fake_docker_check)
     monkeypatch.setattr(cli, "MCPClientManager", FakeMCPManager)
     monkeypatch.setattr(cli, "Repl", NoopRepl)
 
@@ -661,7 +660,6 @@ async def test_async_startup_mcp_backend_mounts_internal_sandbox(
         None,
     )
 
-    assert seen["preflight"]
     sandbox_server = seen["servers"]["sandbox"]
     assert sandbox_server.command == sys.executable
     assert sandbox_server.args == ["-m", "pion.cli", "mcp"]
@@ -676,10 +674,23 @@ async def test_async_startup_mcp_backend_fails_closed_without_docker(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def failing_docker_check():
-        raise SandboxUnavailableError("no daemon")
+    # The Docker preflight now lives in the `pion mcp` child; when it fails, the
+    # sandbox server never connects, so the main process must fail fast rather
+    # than run the agent with no tools.
+    class FakeMCPManager:
+        def __init__(self, servers):
+            self.tools = []
+            self.errors = ["sandbox: Docker sandbox unavailable: no daemon"]
+            self.connected_server_count = 0
+            self.connected_server_names = set()
 
-    monkeypatch.setattr(cli, "check_docker_available", failing_docker_check)
+        async def start(self, reserved):
+            pass
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "MCPClientManager", FakeMCPManager)
     monkeypatch.setattr(
         cli, "build_runtime", lambda *a: pytest.fail("must not build runtime")
     )
@@ -696,6 +707,35 @@ async def test_async_startup_mcp_backend_fails_closed_without_docker(
             None,
         )
     assert excinfo.value.exit_code == 1
+
+
+def test_main_process_imports_without_sandbox_extra() -> None:
+    """The default CLI must import with the optional `sandbox` extra absent.
+
+    Poison ``sys.modules`` so any `import sandbox_docker_mcp` raises, then import
+    the modules the `pion` entry point pulls in and run the default (host)
+    `build_runtime` path. A regression — a top-level import of the extra sneaking
+    back into the main process — surfaces here as a ModuleNotFoundError, even
+    though this venv has the extra installed for the adapter tests.
+    """
+    script = (
+        "import sys\n"
+        "sys.modules['sandbox_docker_mcp'] = None\n"
+        "import pion.cli\n"
+        "import pion.config\n"
+        "from pathlib import Path\n"
+        "from pion.sandbox import SandboxSettings, build_runtime\n"
+        "build_runtime(SandboxSettings(backend='off'), Path('.'))\n"
+        "assert sys.modules.get('sandbox_docker_mcp') is None\n"
+        "print('OK')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("OK")
 
 
 # ---------------------------------------------------------------------------

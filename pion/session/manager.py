@@ -86,6 +86,10 @@ class SessionManager:
         self._leaf_id: str | None = None
         self._labels_by_id: dict[str, str] = {}
         self._label_timestamps_by_id: dict[str, int] = {}
+        #: Non-fatal problems found while replaying a session file. Populated by
+        #: load(); a corrupt line is skipped and recorded here rather than
+        #: aborting the whole session.
+        self.load_errors: list[str] = []
 
     # ------------------------------------------------------------------
     # Loading / persistence
@@ -101,11 +105,17 @@ class SessionManager:
         """
         manager = cls(path)
         with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
+            for line_number, line in enumerate(fh, start=1):
                 line = line.strip()
                 if not line:
                     continue
-                entry = SessionEntry.model_validate(json.loads(line))
+                try:
+                    entry = SessionEntry.model_validate(json.loads(line))
+                except (ValueError, TypeError) as exc:
+                    # One corrupt line (partial write, manual edit) must not
+                    # take down the whole session. Skip it and keep replaying.
+                    manager.load_errors.append(f"line {line_number}: {exc}")
+                    continue
                 if entry.message is not None:
                     entry.message = sanitize_message(entry.message)
                 manager._entries[entry.id] = entry
@@ -282,26 +292,40 @@ class SessionManager:
             parent = entry.parent_id if entry.parent_id in self._entries else None
             children.setdefault(parent, []).append(entry_id)
 
-        def build(entry_id: str, ancestors: frozenset[str]) -> SessionTreeNode:
-            entry = self._entries[entry_id]
-            if entry_id in ancestors:  # defensive handling for corrupted files
-                child_nodes: tuple[SessionTreeNode, ...] = ()
-            else:
-                child_nodes = tuple(
-                    build(child_id, ancestors | {entry_id})
-                    for child_id in children.get(entry_id, [])
-                    if child_id != entry_id
-                )
+        def node_for(entry_id: str, child_nodes: tuple[SessionTreeNode, ...]) -> SessionTreeNode:
             return SessionTreeNode(
-                entry=entry.model_copy(deep=True),
+                entry=self._entries[entry_id].model_copy(deep=True),
                 children=child_nodes,
                 label=self._labels_by_id.get(entry_id),
                 label_timestamp=self._label_timestamps_by_id.get(entry_id),
             )
 
-        return tuple(
-            build(entry_id, frozenset()) for entry_id in children.get(None, [])
-        )
+        # Iterative post-order build so a deep (e.g. long linear) session cannot
+        # exceed Python's recursion limit. Each entry has a single parent, so the
+        # structure reachable from the roots is a forest visited once; the
+        # ``ancestors`` guard stays as defensive handling for corrupted files.
+        built: dict[str, SessionTreeNode] = {}
+        # Stack frames: (entry_id, ancestors, expanded).
+        stack: list[tuple[str, frozenset[str], bool]] = [
+            (entry_id, frozenset(), False)
+            for entry_id in reversed(children.get(None, []))
+        ]
+        while stack:
+            entry_id, ancestors, expanded = stack.pop()
+            kids = (
+                []
+                if entry_id in ancestors
+                else [c for c in children.get(entry_id, []) if c != entry_id]
+            )
+            if expanded:
+                built[entry_id] = node_for(entry_id, tuple(built[c] for c in kids))
+                continue
+            stack.append((entry_id, ancestors, True))
+            child_ancestors = ancestors | {entry_id}
+            for child_id in reversed(kids):
+                stack.append((child_id, child_ancestors, False))
+
+        return tuple(built[entry_id] for entry_id in children.get(None, []))
 
     # ------------------------------------------------------------------
     # Context building

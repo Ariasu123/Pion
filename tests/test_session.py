@@ -159,6 +159,28 @@ def test_tree_returns_defensive_nodes_and_resolved_labels(tmp_path: Path) -> Non
     assert loaded.get_entries()[0] is not loaded.get_entry(root)
 
 
+def test_get_tree_handles_deep_linear_session() -> None:
+    # A long linear session is a chain far deeper than Python's recursion limit.
+    # The iterative post-order build must return the full nested structure
+    # instead of raising RecursionError.
+    manager = SessionManager()
+    for i in range(3000):
+        manager.append_message(_user(f"m{i}"))
+
+    roots = manager.get_tree()
+
+    assert len(roots) == 1
+    depth = 0
+    node = roots[0]
+    while True:
+        depth += 1
+        if not node.children:
+            break
+        assert len(node.children) == 1
+        node = node.children[0]
+    assert depth == 3000
+
+
 def test_label_clear_is_append_only() -> None:
     manager = SessionManager()
     target = manager.append_message(_user("bookmark me"))

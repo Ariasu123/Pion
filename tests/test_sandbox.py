@@ -10,6 +10,7 @@ import pytest
 from pion.config import PionConfig
 from pion.sandbox import (
     SandboxCommandResult,
+    SandboxError,
     SandboxRuntime,
     SandboxSettings,
     WorkspaceAccessError,
@@ -86,6 +87,14 @@ def test_build_runtime_returns_host(tmp_path: Path) -> None:
     host = build_runtime(SandboxSettings(), tmp_path)
     assert host.backend == "host"
     assert host.guard is None
+
+
+def test_build_runtime_rejects_non_host_backend(tmp_path: Path) -> None:
+    # build_runtime only serves the host backend; a sandboxed backend must raise
+    # rather than silently hand back an unsandboxed host runtime.
+    settings = SandboxSettings.model_validate({"backend": "mcp"})
+    with pytest.raises(SandboxError):
+        build_runtime(settings, tmp_path)
 
 
 def test_guard_allows_relative_absolute_and_future_workspace_paths(tmp_path: Path) -> None:

@@ -14,6 +14,7 @@ from ..llm.event_stream import StreamOptions
 from ..llm.types import (
     AssistantMessage,
     Context,
+    ImageContent,
     Message,
     Model,
     TextContent,
@@ -71,24 +72,34 @@ Include only information learned on the abandoned branch: approaches tried, file
 StreamFn = Callable[[Model, Context, StreamOptions], Any]
 
 
+def _content_chars(block: object) -> int:
+    """Char-equivalent size of one content block, counting image payloads.
+
+    A base64 image (`ImageContent.data`) is often hundreds of KB; ignoring it
+    made image-heavy sessions estimate ~0 tokens and never auto-compact, so the
+    provider rejected the oversized request. Count its encoded length.
+    """
+    if isinstance(block, TextContent):
+        return len(block.text)
+    if isinstance(block, ThinkingContent):
+        return len(block.thinking)
+    if isinstance(block, ImageContent):
+        return len(block.data)
+    if isinstance(block, ToolCall):
+        return len(block.name) + len(json.dumps(block.arguments))
+    return 0
+
+
 def _message_chars(message: Message) -> int:
     """Character count of a message's meaningful content."""
     if isinstance(message, UserMessage):
         if isinstance(message.content, str):
             return len(message.content)
-        return sum(len(c.text) for c in message.content if isinstance(c, TextContent))
+        return sum(_content_chars(block) for block in message.content)
     if isinstance(message, AssistantMessage):
-        chars = 0
-        for block in message.content:
-            if isinstance(block, TextContent):
-                chars += len(block.text)
-            elif isinstance(block, ThinkingContent):
-                chars += len(block.thinking)
-            elif isinstance(block, ToolCall):
-                chars += len(block.name) + len(json.dumps(block.arguments))
-        return chars
+        return sum(_content_chars(block) for block in message.content)
     # ToolResultMessage
-    return sum(len(c.text) for c in message.content if isinstance(c, TextContent))
+    return sum(_content_chars(block) for block in message.content)
 
 
 def estimate_tokens(messages: list[Message]) -> int:

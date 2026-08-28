@@ -24,27 +24,44 @@ from ..sandbox.docker import to_external_settings
 
 
 def resolve_server_settings() -> SandboxSettings:
-    """Apply legacy ``PION_SANDBOX_*`` overrides to Pion's saved policy."""
+    """Apply legacy ``PION_SANDBOX_*`` overrides to Pion's saved policy.
 
-    try:
-        settings = load_config().sandbox
-    except Exception:
-        settings = SandboxSettings()
+    This process executes sandboxed commands, so it fails closed: a corrupt
+    saved config (``load_config`` raises) or an invalid ``PION_SANDBOX_*`` value
+    aborts instead of silently reverting to the — possibly more permissive —
+    built-in defaults. A missing config file is fine: ``load_config`` returns
+    the defaults without raising.
+    """
+
+    settings = load_config().sandbox
     updates: dict[str, object] = {}
     env = os.environ
     if env.get("PION_SANDBOX_IMAGE"):
         updates["image"] = env["PION_SANDBOX_IMAGE"]
-    if env.get("PION_SANDBOX_NETWORK") in ("bridge", "none"):
-        updates["network"] = env["PION_SANDBOX_NETWORK"]
+    network = env.get("PION_SANDBOX_NETWORK")
+    if network:
+        if network not in ("bridge", "none"):
+            raise ValueError(
+                f"PION_SANDBOX_NETWORK must be 'bridge' or 'none', got {network!r}"
+            )
+        updates["network"] = network
     if env.get("PION_SANDBOX_GIT_WRITE") == "1":
         updates["git_write"] = True
-    if env.get("PION_SANDBOX_MEMORY_MB", "").isdigit():
-        updates["memory_mb"] = int(env["PION_SANDBOX_MEMORY_MB"])
-    if env.get("PION_SANDBOX_CPUS"):
+    memory = env.get("PION_SANDBOX_MEMORY_MB")
+    if memory:
+        if not memory.isdigit():
+            raise ValueError(
+                f"PION_SANDBOX_MEMORY_MB must be a positive integer, got {memory!r}"
+            )
+        updates["memory_mb"] = int(memory)
+    cpus = env.get("PION_SANDBOX_CPUS")
+    if cpus:
         try:
-            updates["cpus"] = float(env["PION_SANDBOX_CPUS"])
+            updates["cpus"] = float(cpus)
         except ValueError:
-            pass
+            raise ValueError(
+                f"PION_SANDBOX_CPUS must be a number, got {cpus!r}"
+            ) from None
     if updates:
         settings = SandboxSettings.model_validate(
             {**settings.model_dump(mode="python"), **updates}

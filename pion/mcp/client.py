@@ -11,7 +11,7 @@ import json
 import os
 import re
 from collections.abc import Iterable
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, ClassVar, Optional
@@ -26,6 +26,10 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from ..config import MCPServerConfig
 from ..llm.types import ImageContent, TextContent, sanitize_text
 from ..tools.base import AgentToolResult, OnUpdate
+
+
+class _Aborted(Exception):
+    """Internal signal that an in-flight remote call was cancelled by abort."""
 
 
 class MCPToolArguments(BaseModel):
@@ -69,6 +73,57 @@ def _redact_values(message: str, values: Iterable[str]) -> str:
         if value:
             redacted = redacted.replace(value, "***")
     return redacted
+
+
+# Substrings (case-insensitive) that mark a host env var as a likely secret.
+# Such vars are stripped before spawning an stdio MCP child so Pion's own
+# provider credentials (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, ...) don't leak
+# into every server. A server that genuinely needs one opts in explicitly via
+# `config.env`, which is layered on top afterwards.
+_SECRET_ENV_MARKERS = (
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "TOKEN",
+    "API_KEY",
+    "APIKEY",
+    "ACCESS_KEY",
+    "PRIVATE_KEY",
+    "CREDENTIAL",
+)
+
+
+def _is_secret_env_name(name: str) -> bool:
+    upper = name.upper()
+    return any(marker in upper for marker in _SECRET_ENV_MARKERS)
+
+
+def _child_environment(config_env: dict[str, str]) -> dict[str, str]:
+    """Host environment for an MCP child, minus likely-secret host vars.
+
+    Everything else is inherited so servers still find their runtime
+    (PATH/HOME/...); `config_env` is layered on top so an explicitly configured
+    secret still reaches the child that needs it.
+    """
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not _is_secret_env_name(key)
+    }
+    environment.update(config_env)
+    return environment
+
+
+def _host_secret_values() -> tuple[str, ...]:
+    """Values of likely-secret host env vars, for redacting from error text.
+
+    Short values are skipped to avoid garbling unrelated text.
+    """
+    return tuple(
+        value
+        for key, value in os.environ.items()
+        if _is_secret_env_name(key) and len(value) >= 6
+    )
 
 
 def _convert_content(block: Any) -> TextContent | ImageContent:
@@ -133,11 +188,9 @@ class MCPTool:
         if abort is not None and abort.is_set():
             return AgentToolResult.text("Error: operation aborted", is_error=True)
         try:
-            result = await self._session.call_tool(
-                self.remote_name,
-                args.model_dump(),
-                read_timeout_seconds=self._timeout,
-            )
+            result = await self._call_with_abort(args, abort)
+        except _Aborted:
+            return AgentToolResult.text("Error: operation aborted", is_error=True)
         except Exception as exc:
             return AgentToolResult.text(
                 f"MCP tool {self.name} failed: "
@@ -162,6 +215,38 @@ class MCPTool:
             details=details,
             is_error=bool(result.isError),
         )
+
+    async def _call_with_abort(
+        self, args: BaseModel, abort: Optional[asyncio.Event]
+    ) -> mcp_types.CallToolResult:
+        """Invoke the remote tool, racing the request against `abort`.
+
+        Without this, an aborted turn would still block on a slow remote tool
+        until `read_timeout` elapsed. On abort we cancel the in-flight request
+        and raise `_Aborted`; the late JSON-RPC response is dropped by the
+        session. If the call finishes first it is returned (or re-raises its own
+        failure to the caller).
+        """
+        call = asyncio.ensure_future(
+            self._session.call_tool(
+                self.remote_name,
+                args.model_dump(),
+                read_timeout_seconds=self._timeout,
+            )
+        )
+        if abort is None:
+            return await call
+        waiter = asyncio.ensure_future(abort.wait())
+        try:
+            await asyncio.wait({call, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+        if not call.done():
+            call.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await call
+            raise _Aborted
+        return call.result()
 
 
 @dataclass
@@ -193,17 +278,30 @@ class MCPClientManager:
             stack = AsyncExitStack()
             try:
                 connection = await self._connect(name, config, stack)
-                discovered_names = [tool.name for tool in connection.tools]
-                invalid_names = sorted(
-                    tool_name
-                    for tool_name in discovered_names
-                    if len(tool_name) > 64
-                    or re.fullmatch(r"[A-Za-z0-9_-]+", tool_name) is None
+                # Charset is validated on the *bare* remote name: the server
+                # prefix is already constrained by PionConfig, so a bad character
+                # can only originate from the remote tool, and reporting the bare
+                # name points the error at the real culprit instead of the
+                # prefixed "server__tool" string.
+                bad_remote = sorted(
+                    tool.remote_name
+                    for tool in connection.tools
+                    if not tool.remote_name
+                    or re.fullmatch(r"[A-Za-z0-9_-]+", tool.remote_name) is None
                 )
-                if invalid_names:
+                if bad_remote:
                     raise ValueError(
-                        "tool names must contain at most 64 ASCII letters, digits, '_' or '-': "
-                        + ", ".join(invalid_names)
+                        "remote tool names must be non-empty and use only ASCII "
+                        "letters, digits, '_' or '-': " + ", ".join(bad_remote)
+                    )
+                discovered_names = [tool.name for tool in connection.tools]
+                # The exposed "server__tool" name is what the provider sees and
+                # must fit its 64-character tool-name limit.
+                too_long = sorted(name for name in discovered_names if len(name) > 64)
+                if too_long:
+                    raise ValueError(
+                        "exposed tool names exceed the 64-character limit; shorten "
+                        "the server name or the remote tool: " + ", ".join(too_long)
                     )
                 if len(discovered_names) != len(set(discovered_names)):
                     raise ValueError("server returned duplicate tool names")
@@ -214,17 +312,19 @@ class MCPClientManager:
                 )
                 if conflicts:
                     raise ValueError("tool name conflict: " + ", ".join(conflicts))
-            except asyncio.CancelledError:
-                try:
-                    await stack.aclose()
-                finally:
-                    raise
-            except Exception as exc:
+            except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+                # Genuine shutdown of our own coroutine — clean up and propagate.
+                await self._safe_aclose(stack)
+                raise
+            except BaseException as exc:
+                # asyncio.timeout cancelling the MCP anyio task group surfaces
+                # as a (Base)ExceptionGroup, which `except Exception` would miss
+                # — letting one slow or broken server kill the whole startup.
+                # Degrade to a recorded per-server error instead.
                 message = str(exc)
-                try:
-                    await stack.aclose()
-                except Exception as close_exc:
-                    message += f" (cleanup also failed: {close_exc})"
+                close_error = await self._safe_aclose(stack)
+                if close_error is not None:
+                    message += f" (cleanup also failed: {close_error})"
                 self.errors.append(f"{name}: {self._redact(message, config)}")
                 continue
             self.connections.append(connection)
@@ -237,8 +337,7 @@ class MCPClientManager:
         config: MCPServerConfig,
         stack: AsyncExitStack,
     ) -> MCPServerConnection:
-        environment = os.environ.copy()
-        environment.update(config.env)
+        environment = _child_environment(config.env)
         params = StdioServerParameters(
             command=config.command,
             args=config.args,
@@ -264,13 +363,14 @@ class MCPClientManager:
                 cursor = page.nextCursor
                 if cursor is None:
                     break
+        redact = (*config.env.values(), *_host_secret_values())
         tools = [
             MCPTool(
                 name,
                 tool,
                 session,
                 config.timeout_seconds,
-                config.env.values(),
+                redact,
             )
             for tool in remote_tools
         ]
@@ -278,19 +378,37 @@ class MCPClientManager:
 
     async def close(self) -> None:
         for connection in reversed(self.connections):
-            try:
-                await connection.stack.aclose()
-            except Exception as exc:
+            close_error = await self._safe_aclose(connection.stack)
+            if close_error is not None:
                 config = self.servers[connection.name]
                 self.errors.append(
-                    f"{connection.name} shutdown: {self._redact(str(exc), config)}"
+                    f"{connection.name} shutdown: {self._redact(close_error, config)}"
                 )
         self.connections.clear()
         self.tools.clear()
 
     @staticmethod
+    async def _safe_aclose(stack: AsyncExitStack) -> str | None:
+        """Close `stack`, returning the failure text instead of raising.
+
+        The MCP session lives inside anyio task groups whose teardown can raise
+        a `BaseExceptionGroup` that `except Exception` would miss; swallow every
+        non-cancellation failure so cleanup never masks the real error or kills
+        an unrelated server.
+        """
+        try:
+            await stack.aclose()
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001 - teardown failures are reported, not raised
+            return str(exc)
+        return None
+
+    @staticmethod
     def _redact(message: str, config: MCPServerConfig) -> str:
-        return _redact_values(message, config.env.values())
+        return _redact_values(
+            message, (*config.env.values(), *_host_secret_values())
+        )
 
 
 __all__ = ["MCPClientManager", "MCPServerConnection", "MCPTool", "MCPToolArguments"]

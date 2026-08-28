@@ -129,6 +129,19 @@ def test_select_list_selected_row_has_bg():
     assert visible_width(line) == 20
 
 
+def test_select_list_cjk_label_does_not_overflow():
+    # A wide (CJK) label must be measured by display width, not len(), when
+    # computing the room left for the description; using len() underestimates
+    # the label by ~2x and the rendered row overflows the width.
+    sl = SelectList(
+        [SelectItem("a", "你好世界你好世界", "描述文字说明补充")],
+        filterable=False,
+        theme=THEME,
+    )
+    lines = sl.render(30)
+    assert all(visible_width(line) <= 30 for line in lines)
+
+
 def test_autocomplete_slash(tmp_path):
     provider = CombinedAutocompleteProvider(
         [SlashCommand("tree", "session tree"), SlashCommand("stats", "usage")],

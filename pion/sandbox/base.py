@@ -19,6 +19,11 @@ SandboxBackend = Literal["off", "mcp"]
 SandboxNetwork = Literal["bridge", "none"]
 OutputCallback = Callable[[str], None]
 
+# After the shell process exits (or is killed) the output pump should reach
+# EOF almost immediately. A backgrounded grandchild that inherited the stdout
+# write end can keep the pipe open forever, so bound the final drain.
+_PUMP_DRAIN_TIMEOUT_S = 2.0
+
 
 class SandboxError(RuntimeError):
     """Base class for sandbox startup and execution failures."""
@@ -211,10 +216,12 @@ class HostSandboxRuntime(SandboxRuntime):
             for task in pending:
                 if task is not wait_task:
                     task.cancel()
-            await asyncio.gather(wait_task, pump_task, return_exceptions=True)
+            await asyncio.gather(wait_task, return_exceptions=True)
+            await self._drain_pump(pump_task)
         except asyncio.CancelledError:
             self._kill_process_tree(proc)
-            await asyncio.gather(wait_task, pump_task, return_exceptions=True)
+            await asyncio.gather(wait_task, return_exceptions=True)
+            await self._drain_pump(pump_task)
             raise
         finally:
             if abort_task is not None:
@@ -227,6 +234,19 @@ class HostSandboxRuntime(SandboxRuntime):
             timed_out=timed_out,
             aborted=aborted,
         )
+
+    @staticmethod
+    async def _drain_pump(pump_task: asyncio.Task) -> None:
+        """Collect the output pump, but never block forever on it.
+
+        `wait_for` cancels the task on timeout, so a pump stuck on a pipe kept
+        open by a backgrounded grandchild is abandoned rather than hanging the
+        whole `execute` call past its deadline.
+        """
+        try:
+            await asyncio.wait_for(pump_task, timeout=_PUMP_DRAIN_TIMEOUT_S)
+        except (asyncio.TimeoutError, Exception):
+            pass
 
     @staticmethod
     def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:

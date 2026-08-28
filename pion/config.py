@@ -10,6 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .llm.registry import get_model
 from .llm.types import Model
 from .sandbox.base import SandboxSettings
 
@@ -33,14 +34,27 @@ class ProfileConfig(BaseModel):
     def to_model(self) -> Model:
         """Build the runtime model descriptor for this profile."""
         provider = "anthropic" if self.api == "anthropic-messages" else "openai"
+        # Prefer the real context window / max output from the built-in
+        # registry when this profile names a known model, so auto-compaction
+        # fires at the right size (a 200k Claude shouldn't compact as if it
+        # were 128k). Custom/self-hosted ids fall back to conservative defaults.
+        context_window = 128_000
+        max_tokens = 8192
+        try:
+            known = get_model(self.model)
+        except KeyError:
+            known = None
+        if known is not None:
+            context_window = known.context_window
+            max_tokens = known.max_tokens
         return Model(
             id=self.model,
             name=self.model,
             api=self.api,
             provider=provider,
             baseUrl=self.base_url,
-            contextWindow=128_000,
-            maxTokens=8192,
+            contextWindow=context_window,
+            maxTokens=max_tokens,
         )
 
 

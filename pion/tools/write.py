@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from ..sandbox.base import SandboxRuntime
 from ..sandbox.workspace import WorkspaceAccessError, WorkspaceGuard
+from ._atomic import atomic_write_text
 from .base import AgentToolResult, OnUpdate
 
 
@@ -53,7 +54,7 @@ class WriteTool:
         on_update: Optional[OnUpdate] = None,
     ) -> AgentToolResult:
         if abort is not None and abort.is_set():
-            return AgentToolResult.text("Error: operation aborted")
+            return AgentToolResult.text("Error: operation aborted", is_error=True)
 
         try:
             path = (
@@ -65,6 +66,7 @@ class WriteTool:
             return AgentToolResult.text(
                 f"Error: {exc}",
                 details=self._details({"denied": True}),
+                is_error=True,
             )
         try:
             if self.guard is not None:
@@ -79,11 +81,12 @@ class WriteTool:
                     handle.write(args.content.encode("utf-8"))
             else:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(args.content, encoding="utf-8")
+                atomic_write_text(path, args.content)
         except OSError as exc:
             return AgentToolResult.text(
                 f"Error: could not write {args.path}: {exc}",
                 details=self._details({}),
+                is_error=True,
             )
 
         num_bytes = len(args.content.encode("utf-8"))

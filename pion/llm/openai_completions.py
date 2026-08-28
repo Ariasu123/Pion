@@ -96,7 +96,12 @@ async def _run(
                         continue
                     if data == "[DONE]":
                         break
-                    chunk = json.loads(data)
+                    try:
+                        chunk = json.loads(data)
+                    except (json.JSONDecodeError, ValueError):
+                        # A single malformed frame must not tear down an
+                        # in-progress stream and drop what was already yielded.
+                        continue
 
                     if chunk.get("id") and not output.response_id:
                         output.response_id = chunk["id"]

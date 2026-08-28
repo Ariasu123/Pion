@@ -64,7 +64,7 @@ class ReadTool:
         on_update: Optional[OnUpdate] = None,
     ) -> AgentToolResult:
         if abort is not None and abort.is_set():
-            return AgentToolResult.text("Error: operation aborted")
+            return AgentToolResult.text("Error: operation aborted", is_error=True)
 
         try:
             path = (
@@ -76,6 +76,7 @@ class ReadTool:
             return AgentToolResult.text(
                 f"Error: {exc}",
                 details=self._details({"denied": True}),
+                is_error=True,
             )
         try:
             if self.guard is not None:
@@ -88,16 +89,19 @@ class ReadTool:
             return AgentToolResult.text(
                 f"Error: file not found: {args.path}",
                 details=self._details({}),
+                is_error=True,
             )
         except IsADirectoryError:
             return AgentToolResult.text(
                 f"Error: path is a directory, not a file: {args.path}",
                 details=self._details({}),
+                is_error=True,
             )
         except OSError as exc:
             return AgentToolResult.text(
                 f"Error: could not read {args.path}: {exc}",
                 details=self._details({}),
+                is_error=True,
             )
         try:
             text = raw.decode("utf-8")
@@ -105,6 +109,7 @@ class ReadTool:
             return AgentToolResult.text(
                 f"Error: {args.path} is not valid UTF-8 text",
                 details=self._details({}),
+                is_error=True,
             )
 
         lines = text.split("\n")
@@ -122,6 +127,7 @@ class ReadTool:
                         "totalLines": total_lines,
                     }
                 ),
+                is_error=True,
             )
         # Convert 1-indexed offset to a 0-indexed start. Negative offset: from the end.
         if args.offset < 0:
@@ -138,6 +144,7 @@ class ReadTool:
                         "totalLines": total_lines,
                     }
                 ),
+                is_error=True,
             )
 
         selected = lines[start:]

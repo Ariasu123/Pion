@@ -50,50 +50,57 @@ async def _stream_assistant_response(
     partial: Optional[AssistantMessage] = None
     added_partial = False
 
-    async for event in response:
-        if event.type == "start":
-            partial = event.partial if event.partial is not None else AssistantMessage()
-            context.messages.append(partial)
-            added_partial = True
-            await emit(AgentEvent(type="message_start", message=partial))
-        elif event.type in (
-            "text_start",
-            "text_delta",
-            "text_end",
-            "thinking_start",
-            "thinking_delta",
-            "thinking_end",
-            "toolcall_start",
-            "toolcall_delta",
-            "toolcall_end",
-        ):
-            if partial is not None:
-                if event.partial is not None:
-                    partial = event.partial
-                    context.messages[-1] = partial
-                await emit(
-                    AgentEvent(type="message_update", assistant_event=event, message=partial)
-                )
-        elif event.type in ("done", "error"):
-            final_message = await response.result()
-            # Scrub lone surrogates coming from the provider (unpaired
-            # \uXXXX escapes) before the message enters the context.
-            final_message = sanitize_message(final_message)
-            if added_partial:
-                context.messages[-1] = final_message
-            else:
-                context.messages.append(final_message)
-                await emit(AgentEvent(type="message_start", message=final_message))
-            await emit(AgentEvent(type="message_end", message=final_message))
-            return final_message
+    # try/finally guarantees the provider generator (and its httpx stream) is
+    # closed even if the consuming task is cancelled mid-iteration (e.g. TUI
+    # abort); otherwise the connection lingers until GC. aclose() is a no-op
+    # on a stream that already reached done/error.
+    try:
+        async for event in response:
+            if event.type == "start":
+                partial = event.partial if event.partial is not None else AssistantMessage()
+                context.messages.append(partial)
+                added_partial = True
+                await emit(AgentEvent(type="message_start", message=partial))
+            elif event.type in (
+                "text_start",
+                "text_delta",
+                "text_end",
+                "thinking_start",
+                "thinking_delta",
+                "thinking_end",
+                "toolcall_start",
+                "toolcall_delta",
+                "toolcall_end",
+            ):
+                if partial is not None:
+                    if event.partial is not None:
+                        partial = event.partial
+                        context.messages[-1] = partial
+                    await emit(
+                        AgentEvent(type="message_update", assistant_event=event, message=partial)
+                    )
+            elif event.type in ("done", "error"):
+                final_message = await response.result()
+                # Scrub lone surrogates coming from the provider (unpaired
+                # \uXXXX escapes) before the message enters the context.
+                final_message = sanitize_message(final_message)
+                if added_partial:
+                    context.messages[-1] = final_message
+                else:
+                    context.messages.append(final_message)
+                    await emit(AgentEvent(type="message_start", message=final_message))
+                await emit(AgentEvent(type="message_end", message=final_message))
+                return final_message
 
-    # Stream ended without done/error: result() raises (contract violation).
-    final_message = await response.result()
-    final_message = sanitize_message(final_message)
-    if added_partial:
-        context.messages[-1] = final_message
-    else:
-        context.messages.append(final_message)
-        await emit(AgentEvent(type="message_start", message=final_message))
-    await emit(AgentEvent(type="message_end", message=final_message))
-    return final_message
+        # Stream ended without done/error: result() raises (contract violation).
+        final_message = await response.result()
+        final_message = sanitize_message(final_message)
+        if added_partial:
+            context.messages[-1] = final_message
+        else:
+            context.messages.append(final_message)
+            await emit(AgentEvent(type="message_start", message=final_message))
+        await emit(AgentEvent(type="message_end", message=final_message))
+        return final_message
+    finally:
+        await response.aclose()

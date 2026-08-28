@@ -102,9 +102,13 @@ class Footer(Component):
             left += "  " + theme.fg("warning", f"⇢{queued} queued")
 
         right = theme.fg("dim", agent.model.id)
+        # Clamp right first: a long model id on a narrow terminal must never
+        # push line2 past width. left then takes whatever space remains (and may
+        # vanish entirely), so the total can't exceed width and trigger RenderError.
+        right = truncate_to_width(right, max(0, width))
         gap = width - visible_width(left) - visible_width(right)
         if gap < 2:
-            left = truncate_to_width(left, max(1, width - visible_width(right) - 2))
+            left = truncate_to_width(left, max(0, width - visible_width(right) - 2))
             gap = width - visible_width(left) - visible_width(right)
         line2 = left + " " * max(0, gap) + right
 

@@ -325,12 +325,18 @@ class Editor(Component):
         lines: list[str] = [border]
         cursor_done = False
         for text, row, start in display:
+            offset = self.cursor_col - start
+            # Match the cursor strictly inside a segment, or at the end of a
+            # segment only when there is room to append a cell. Appending at the
+            # end of a *full* (len == width) segment would push the rendered line
+            # to width+1 and raise RenderError; instead defer to the next
+            # segment's offset 0, or to the end-of-input fallback below.
             if (
                 not cursor_done
                 and row == self.cursor_row
-                and start <= self.cursor_col <= start + len(text)
+                and 0 <= offset <= len(text)
+                and (offset < len(text) or len(text) < width)
             ):
-                offset = self.cursor_col - start
                 cell = text[offset : offset + 1] or " "
                 cursor_cell = f"{CURSOR_MARKER}\x1b[7m{cell}{SGR_RESET}"
                 text = text[:offset] + cursor_cell + text[offset + 1 :]

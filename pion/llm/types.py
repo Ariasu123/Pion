@@ -33,6 +33,21 @@ def sanitize_text(text: str) -> str:
         return text.encode("utf-8", "replace").decode("utf-8")
 
 
+def _sanitize_json_value(value: Any) -> Any:
+    """Recursively scrub lone surrogates from strings in a JSON-like value.
+
+    Tool-call arguments are free-form JSON; a lone surrogate anywhere in the
+    structure would break `model_dump_json` when the session is persisted.
+    """
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if isinstance(value, dict):
+        return {key: _sanitize_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json_value(item) for item in value]
+    return value
+
+
 def sanitize_message(message: "Message") -> "Message":
     """Return `message` with all text fields scrubbed of lone surrogates."""
     if isinstance(message, UserMessage):
@@ -48,6 +63,8 @@ def sanitize_message(message: "Message") -> "Message":
                 block.text = sanitize_text(block.text)
             elif isinstance(block, ThinkingContent):
                 block.thinking = sanitize_text(block.thinking)
+            elif isinstance(block, ToolCall):
+                block.arguments = _sanitize_json_value(block.arguments)
         if message.error_message is not None:
             message.error_message = sanitize_text(message.error_message)
     else:  # ToolResultMessage

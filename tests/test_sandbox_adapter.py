@@ -85,3 +85,17 @@ def test_legacy_server_environment_overrides_are_preserved(
     assert resolved.git_write is True
     assert resolved.pids_limit == 96
     assert resolved.protect_paths == [".env", "credentials.json"]
+
+
+def test_invalid_sandbox_env_value_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A bogus PION_SANDBOX_* value must abort rather than be silently ignored:
+    # this process executes sandboxed commands, so a misconfigured policy is a
+    # fail-closed condition, not a downgrade to defaults.
+    monkeypatch.setattr(
+        sandbox_server, "load_config", lambda: SimpleNamespace(sandbox=SandboxSettings())
+    )
+    monkeypatch.setenv("PION_SANDBOX_NETWORK", "wide-open")
+    with pytest.raises(ValueError, match="PION_SANDBOX_NETWORK"):
+        sandbox_server.resolve_server_settings()

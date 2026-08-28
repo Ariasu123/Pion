@@ -69,11 +69,12 @@ class AgentSessionController:
         self._handlers: list[ControllerHandler] = []
         self._tree_abort = asyncio.Event()
         self._tree_summarizing = False
+        self._compacting = False
 
     @property
     def is_busy(self) -> bool:
-        """Whether a turn or branch summary is currently running."""
-        return self.agent.is_streaming or self._tree_summarizing
+        """Whether a turn, branch summary or compaction is currently running."""
+        return self.agent.is_streaming or self._tree_summarizing or self._compacting
 
     def subscribe(self, handler: ControllerHandler) -> None:
         self._handlers.append(handler)
@@ -94,9 +95,12 @@ class AgentSessionController:
                 self.subscriber_errors.append(exc)
 
     async def prompt(self, text: str) -> Any:
+        self.last_error = None
         before = len(self.agent.messages)
         final = await self.agent.prompt(text)
         self.last_usage = final.usage
+        if final.stop_reason == "error" and final.error_message:
+            self.last_error = final.error_message
         for message in self.agent.messages[before:]:
             self.session.append_message(message)
         await self._emit("session_changed", leaf_id=self.session.leaf_id)
@@ -124,30 +128,46 @@ class AgentSessionController:
             return None
         if not force and not should_compact(self.agent.messages, self.agent.model):
             return None
-        await self._emit("compaction_started", force=force)
-        if self.extensions is not None:
-            await self.extensions.notify(
-                "session_before_compact",
-                {
-                    "session_path": str(self.session_path),
-                    "message_count": len(self.agent.messages),
-                },
-            )
         kept_id = self._find_first_kept_entry_id()
-        response = await generate_summary(
-            self.agent.messages,
-            self.agent.model,
-            self.agent.stream_fn,
-            api_key=self.agent.api_key,
-        )
-        summary = response.text()
-        self.session.append_compaction(summary, first_kept_entry_id=kept_id)
-        self.agent.messages = self.session.build_context()
-        await self._emit(
-            "compaction_finished",
-            summary=summary,
-            message_count=len(self.agent.messages),
-        )
+        if not force and not self._compaction_would_progress(kept_id):
+            # The kept tail alone already exceeds the threshold, so summarizing
+            # folds nothing away. Re-running it every turn would just thrash the
+            # LLM without shrinking the context — skip until real progress is
+            # possible.
+            return None
+        summary: str | None = None
+        self._tree_abort.clear()
+        self._compacting = True
+        await self._emit("compaction_started", force=force)
+        try:
+            if self.extensions is not None:
+                await self.extensions.notify(
+                    "session_before_compact",
+                    {
+                        "session_path": str(self.session_path),
+                        "message_count": len(self.agent.messages),
+                    },
+                )
+            response = await generate_summary(
+                self.agent.messages,
+                self.agent.model,
+                self.agent.stream_fn,
+                api_key=self.agent.api_key,
+                abort=self._tree_abort,
+            )
+            summary = response.text()
+            self.session.append_compaction(summary, first_kept_entry_id=kept_id)
+            self.agent.messages = self.session.build_context()
+        finally:
+            # Always pair compaction_started so the UI spinner can't get stuck,
+            # even when generate_summary raises. On failure summary is None and
+            # message_count reflects the unchanged context.
+            self._compacting = False
+            await self._emit(
+                "compaction_finished",
+                summary=summary,
+                message_count=len(self.agent.messages),
+            )
         await self._emit("session_changed", leaf_id=self.session.leaf_id)
         return summary
 
@@ -269,6 +289,26 @@ class AgentSessionController:
             for block in entry.message.content
             if isinstance(block, TextContent)
         )
+
+    def _compaction_would_progress(self, kept_id: str | None) -> bool:
+        """Whether compacting now would actually drop older messages.
+
+        `kept_id` is where the post-compaction tail starts. If it is the very
+        first message after the last compaction (or `None` means keep nothing),
+        summarizing folds nothing away — so re-running it every turn would just
+        thrash. Progress requires at least one message older than `kept_id`.
+        """
+        if kept_id is None:
+            return True  # keep nothing -> the whole prior branch is folded away
+        entries = self.session.get_branch()
+        last_compaction = -1
+        for index, entry in enumerate(entries):
+            if entry.type == "compaction":
+                last_compaction = index
+        for entry in entries[last_compaction + 1 :]:
+            if entry.type == "message" and entry.message is not None:
+                return entry.id != kept_id
+        return False
 
     def _find_first_kept_entry_id(self) -> str | None:
         entries = self.session.get_branch()

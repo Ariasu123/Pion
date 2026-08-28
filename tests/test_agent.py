@@ -433,6 +433,32 @@ async def test_after_tool_call_override():
     assert not results[0].is_error
 
 
+async def test_after_tool_call_override_can_flip_is_error():
+    echo = EchoTool()
+
+    async def after(ctx):
+        # A hook that reclassifies a successful result as an error must have
+        # that flip reflected on the merged result, not just the event flag.
+        return {"is_error": True}
+
+    stream_fn, _, config, emit, context, _ = loop_setup(
+        [
+            {"tool_calls": [tool_call("echo", {"text": "x"})]},
+            {"text": "ok"},
+        ],
+        [echo],
+        after_tool_call=after,
+    )
+    new_messages = await run_agent_loop(
+        [UserMessage(content="go")], context, config, emit, asyncio.Event(), stream_fn
+    )
+
+    results = [m for m in new_messages if isinstance(m, ToolResultMessage)]
+    assert results[0].is_error
+    # Omitted fields keep the executed content rather than being blanked out.
+    assert results[0].text() == "echo:x"
+
+
 async def test_steering_message_injected_mid_run():
     steering_calls = {"n": 0}
 

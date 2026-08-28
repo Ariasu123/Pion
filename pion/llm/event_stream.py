@@ -89,3 +89,15 @@ class AssistantMessageEventStream:
         async for _ in self:
             pass
         return await self._result
+
+    async def aclose(self) -> None:
+        """Close the underlying provider generator, releasing its HTTP connection.
+
+        A consumer that stops early (task cancellation, `break`, an exception)
+        leaves the generator suspended inside its `async with httpx...` blocks;
+        closing it throws GeneratorExit in, unwinding those blocks now instead
+        of waiting for garbage collection. Safe to call on an exhausted stream.
+        """
+        aclose = getattr(self._gen, "aclose", None)
+        if aclose is not None:
+            await aclose()

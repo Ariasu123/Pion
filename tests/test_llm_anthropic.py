@@ -113,6 +113,24 @@ async def collect(stream) -> tuple[list, AssistantMessage]:
 
 
 @respx.mock
+async def test_malformed_sse_frame_is_skipped_not_fatal() -> None:
+    # A single unparseable data frame must not tear down the stream and drop the
+    # text already delivered; it is skipped and the valid events still arrive.
+    content = b"event: ping\ndata: {oops not json\n\n" + text_events("Hello", " world")
+    respx.post(MESSAGES_URL).mock(
+        return_value=httpx.Response(
+            200, content=content, headers={"content-type": "text/event-stream"}
+        )
+    )
+    stream = stream_simple(make_model(), make_context(), StreamOptions(api_key="sk-ant"))
+
+    _, result = await collect(stream)
+
+    assert result.text() == "Hello world"
+    assert result.stop_reason == "stop"
+
+
+@respx.mock
 async def test_text_only_reply() -> None:
     route = respx.post(MESSAGES_URL).mock(
         return_value=httpx.Response(

@@ -249,6 +249,18 @@ async def _run(
         yield AssistantMessageEvent(type="error", reason=output.stop_reason, error=output)
 
 
+def _decode_sse_payload(data_lines: list[str]) -> Optional[dict[str, Any]]:
+    """Decode an SSE ``data:`` payload, returning None for an unparseable frame.
+
+    A single malformed frame must not tear down an in-progress stream and drop
+    everything already yielded; skip it and keep reading.
+    """
+    try:
+        return json.loads("\n".join(data_lines))
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
 async def _iter_sse(
     response: httpx.Response, options: StreamOptions
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
@@ -259,7 +271,9 @@ async def _iter_sse(
         _raise_if_aborted(options)
         if line == "":
             if event_name and data_lines:
-                yield event_name, json.loads("\n".join(data_lines))
+                payload = _decode_sse_payload(data_lines)
+                if payload is not None:
+                    yield event_name, payload
             event_name, data_lines = None, []
             continue
         if line.startswith(":"):
@@ -270,7 +284,9 @@ async def _iter_sse(
             data_lines.append(line[len("data:"):].lstrip())
     # Flush a trailing event if the stream ended without a blank line.
     if event_name and data_lines:
-        yield event_name, json.loads("\n".join(data_lines))
+        payload = _decode_sse_payload(data_lines)
+        if payload is not None:
+            yield event_name, payload
 
 
 def _raise_if_aborted(options: StreamOptions) -> None:

@@ -31,6 +31,8 @@ TRUNCATED_TOOL_CALL_MESSAGE = (
     "complete arguments."
 )
 
+ABORTED_TOOL_CALL_MESSAGE = "Error: tool call not executed (turn aborted)."
+
 
 def _field(source: Any, *names: str) -> Any:
     """Read the first present, non-None field from a dict or object."""
@@ -90,6 +92,39 @@ def _tool_result_message(finalized: _FinalizedToolCall) -> ToolResultMessage:
 async def _emit_tool_result_message(message: ToolResultMessage, emit: AgentEventSink) -> None:
     await emit(AgentEvent(type="message_start", message=message))
     await emit(AgentEvent(type="message_end", message=message))
+
+
+async def _abort_pending_tool_calls(
+    pending: list[ToolCall],
+    emit: AgentEventSink,
+) -> list[ToolResultMessage]:
+    """Backfill error results for tool calls left unexecuted by an abort.
+
+    Every ``tool_use`` block in the assistant message needs a matching
+    ``tool_result`` or the next provider request is rejected. When an abort
+    short-circuits the batch, synthesize an error result for each remaining
+    call (mirrors `_fail_truncated_tool_calls`).
+    """
+    messages: list[ToolResultMessage] = []
+    for tool_call in pending:
+        await emit(
+            AgentEvent(
+                type="tool_execution_start",
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                args=tool_call.arguments,
+            )
+        )
+        finalized = _FinalizedToolCall(
+            tool_call=tool_call,
+            result=_error_tool_result(ABORTED_TOOL_CALL_MESSAGE),
+            is_error=True,
+        )
+        await _emit_tool_execution_end(finalized, emit)
+        result_message = _tool_result_message(finalized)
+        await _emit_tool_result_message(result_message, emit)
+        messages.append(result_message)
+    return messages
 
 
 async def _fail_truncated_tool_calls(
@@ -186,6 +221,10 @@ async def _execute_tool_calls_sequential(
         if abort is not None and abort.is_set():
             break
 
+    if len(finalized_calls) < len(tool_calls):
+        messages.extend(
+            await _abort_pending_tool_calls(tool_calls[len(finalized_calls):], emit)
+        )
     return _ToolCallBatch(
         messages=messages, terminate=_should_terminate_batch(finalized_calls)
     )
@@ -244,6 +283,10 @@ async def _execute_tool_calls_parallel(
         await _emit_tool_result_message(result_message, emit)
         messages.append(result_message)
 
+    if len(entries) < len(tool_calls):
+        messages.extend(
+            await _abort_pending_tool_calls(tool_calls[len(entries):], emit)
+        )
     return _ToolCallBatch(messages=messages, terminate=_should_terminate_batch(ordered))
 
 
@@ -377,23 +420,34 @@ async def _finalize_executed_tool_call(
             )
             if override is not None:
                 # Field-by-field merge; omitted fields keep executed values.
-                result = AgentToolResult(
-                    content=_field(override, "content") or result.content,
-                    details=(
-                        _field(override, "details")
-                        if _field(override, "details") is not None
-                        else result.details
-                    ),
-                    terminate=(
-                        _field(override, "terminate")
-                        if _field(override, "terminate") is not None
-                        else result.terminate
-                    ),
-                    is_error=result.is_error,
-                )
+                # Only a None field is treated as "omitted": an explicit
+                # falsy override (content=[], terminate=False) must win.
+                override_content = _field(override, "content")
+                override_details = _field(override, "details")
+                override_terminate = _field(override, "terminate")
                 override_error = _field(override, "is_error", "isError")
                 if override_error is not None:
                     is_error = override_error
+                result = AgentToolResult(
+                    content=(
+                        override_content
+                        if override_content is not None
+                        else result.content
+                    ),
+                    details=(
+                        override_details
+                        if override_details is not None
+                        else result.details
+                    ),
+                    terminate=(
+                        override_terminate
+                        if override_terminate is not None
+                        else result.terminate
+                    ),
+                    # Keep result.is_error in sync with the returned is_error so
+                    # event.result.is_error and event.is_error never diverge.
+                    is_error=is_error,
+                )
         except Exception as exc:
             result = _error_tool_result(str(exc))
             is_error = True

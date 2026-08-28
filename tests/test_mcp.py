@@ -9,9 +9,12 @@ import pytest
 from mcp import types as mcp_types
 from pydantic import ValidationError
 
+import asyncio
+
 from pion.config import MCPServerConfig
 from pion.llm.types import ImageContent, TextContent
-from pion.mcp import MCPClientManager, MCPTool
+from pion.mcp import MCPClientManager, MCPServerConnection, MCPTool
+from pion.mcp.client import _child_environment
 
 
 class FakeSession:
@@ -179,3 +182,66 @@ async def test_manager_redacts_configured_environment_values_from_errors(
     await manager.start()
     assert "do-not-print" not in manager.errors[0]
     assert "***" in manager.errors[0]
+
+
+async def test_manager_rejects_bad_remote_tool_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A remote tool whose *bare* name has an illegal character must be reported
+    # by that bare name, and the whole server dropped as an isolated error.
+    manager = MCPClientManager({"demo": MCPServerConfig(command="whatever")})
+
+    async def fake_connect(name, config, stack):
+        bad = mcp_types.Tool(
+            name="bad name!",
+            inputSchema={"type": "object", "additionalProperties": True},
+        )
+        tool = MCPTool(name, bad, FakeSession(), 5)
+        return MCPServerConnection(name=name, session=FakeSession(), stack=stack, tools=[tool])
+
+    monkeypatch.setattr(manager, "_connect", fake_connect)
+    await manager.start()
+    assert manager.connected_server_count == 0
+    assert "remote tool names" in manager.errors[0]
+    assert "bad name!" in manager.errors[0]
+
+
+async def test_execute_aborts_in_flight_remote_call() -> None:
+    # Aborting mid-call must not block until read_timeout: the racing abort
+    # cancels the in-flight request and returns an error result promptly.
+    started = asyncio.Event()
+
+    class SlowSession:
+        async def call_tool(self, name, arguments, **kwargs):
+            started.set()
+            await asyncio.sleep(60)
+            raise AssertionError("should have been cancelled")
+
+    tool = MCPTool("demo", remote_tool(), SlowSession(), 30)
+    abort = asyncio.Event()
+    task = asyncio.ensure_future(
+        tool.execute("c1", tool.Args.model_validate({"query": "x"}), abort=abort)
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    abort.set()
+    result = await asyncio.wait_for(task, timeout=1)
+    assert result.is_error
+    assert "aborted" in result.content[0].text
+
+
+async def test_child_environment_strips_host_secrets_but_keeps_config_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Pion's own provider credentials must not leak into an MCP child, but a
+    # non-secret host var and anything the user set via config.env must survive.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-leak")
+    monkeypatch.setenv("MY_GITHUB_TOKEN", "ghp-should-not-leak")
+    monkeypatch.setenv("PION_MCP_TEST_VALUE", "inherited")
+
+    env = _child_environment({"OPENAI_API_KEY": "explicitly-provided"})
+
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "MY_GITHUB_TOKEN" not in env
+    assert env["PION_MCP_TEST_VALUE"] == "inherited"
+    # An explicit config.env secret is layered back on for the server that needs it.
+    assert env["OPENAI_API_KEY"] == "explicitly-provided"

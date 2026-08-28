@@ -10,8 +10,15 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
+import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+# These are end-to-end tests of the `pion mcp` sandbox server, which runs the
+# external sandbox_docker_mcp server loop (even with PION_SANDBOX_BACKEND=off).
+# Skip the whole module when the optional `sandbox` extra is absent — CI runs
+# extra-free on purpose to regression-test the main-process decoupling.
+pytest.importorskip("sandbox_docker_mcp")
 
 
 @asynccontextmanager

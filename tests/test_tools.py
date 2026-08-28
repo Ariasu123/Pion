@@ -89,6 +89,7 @@ async def test_read_limit_zero_has_no_bogus_note(tmp_path):
 async def test_read_not_found(tmp_path):
     result = await READ_TOOL.execute("t6", ReadArgs(path=str(tmp_path / "nope.txt")))
     assert "not found" in text_of(result)
+    assert result.is_error
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +126,7 @@ async def test_edit_file_not_found(tmp_path):
         "t10", EditArgs(path=str(tmp_path / "nope.txt"), old_string="a", new_string="b")
     )
     assert "not found" in text_of(result)
+    assert result.is_error
 
 
 async def test_edit_old_string_not_found(tmp_path):
@@ -171,6 +173,8 @@ async def test_bash_exit_code_propagates():
     text = text_of(result)
     assert "oops" in text
     assert "exit code 3" in text
+    # A non-zero exit is a normal command outcome, not a tool error.
+    assert not result.is_error
 
 
 async def test_bash_stderr_is_captured():
@@ -187,6 +191,7 @@ async def test_bash_timeout_kills_process():
     text = text_of(result)
     assert "timed out" in text
     assert "earlybird" in text  # partial output preserved
+    assert result.is_error  # a timeout is a genuine tool error
     assert "latebird" not in text
 
 

@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from ..sandbox.base import SandboxRuntime
 from ..sandbox.workspace import WorkspaceAccessError, WorkspaceGuard
+from ._atomic import atomic_write_text
 from .base import AgentToolResult, OnUpdate
 
 
@@ -59,12 +60,14 @@ class EditTool:
             return AgentToolResult.text(
                 "Error: operation aborted",
                 details=self._details({"replacements": 0}),
+                is_error=True,
             )
 
         if not args.old_string:
             return AgentToolResult.text(
                 "Error: old_string must not be empty",
                 details=self._details({"replacements": 0}),
+                is_error=True,
             )
 
         try:
@@ -77,6 +80,7 @@ class EditTool:
             return AgentToolResult.text(
                 f"Error: {exc}",
                 details=self._details({"denied": True, "replacements": 0}),
+                is_error=True,
             )
         secure_handle = None
         try:
@@ -92,16 +96,19 @@ class EditTool:
                 return AgentToolResult.text(
                     f"Error: file not found: {args.path}",
                     details=self._details({"replacements": 0}),
+                    is_error=True,
                 )
             except IsADirectoryError:
                 return AgentToolResult.text(
                     f"Error: path is a directory, not a file: {args.path}",
                     details=self._details({"replacements": 0}),
+                    is_error=True,
                 )
             except (OSError, UnicodeDecodeError) as exc:
                 return AgentToolResult.text(
                     f"Error: could not read {args.path}: {exc}",
                     details=self._details({"replacements": 0}),
+                    is_error=True,
                 )
 
             occurrences = content.count(args.old_string)
@@ -110,12 +117,14 @@ class EditTool:
                     f"Error: old_string not found in {args.path}. "
                     "It must match the file content exactly.",
                     details=self._details({"replacements": 0}),
+                    is_error=True,
                 )
             if occurrences > 1 and not args.replace_all:
                 return AgentToolResult.text(
                     f"Error: old_string occurs {occurrences} times in {args.path}. "
                     "Provide more context to make it unique, or set replace_all to true.",
                     details=self._details({"replacements": 0}),
+                    is_error=True,
                 )
 
             replacements = occurrences if args.replace_all else 1
@@ -130,11 +139,12 @@ class EditTool:
                     secure_handle.write(new_content.encode("utf-8"))
                     secure_handle.truncate()
                 else:
-                    path.write_text(new_content, encoding="utf-8")
+                    atomic_write_text(path, new_content)
             except OSError as exc:
                 return AgentToolResult.text(
                     f"Error: could not write {args.path}: {exc}",
                     details=self._details({"replacements": 0}),
+                    is_error=True,
                 )
 
             return AgentToolResult.text(

@@ -95,6 +95,7 @@ class BashTool:
                     truncated=False,
                     aborted=True,
                 ),
+                is_error=True,
             )
 
         try:
@@ -115,6 +116,7 @@ class BashTool:
             return AgentToolResult.text(
                 f"Error: sandbox command failed: {exc}",
                 details=details(exit_code=None, truncated=False),
+                is_error=True,
             )
 
         output = result.output
@@ -129,11 +131,11 @@ class BashTool:
         )
         if result.aborted:
             text = f"Command aborted.\n\n{output}" if output else "Command aborted."
-            return AgentToolResult.text(text, details=result_details)
+            return AgentToolResult.text(text, details=result_details, is_error=True)
         if result.timed_out:
             note = f"Error: command timed out after {args.timeout_s}s and was killed."
             text = f"{note}\n\n{output}" if output else note
-            return AgentToolResult.text(text, details=result_details)
+            return AgentToolResult.text(text, details=result_details, is_error=True)
 
         exit_code = result.exit_code
         text = output

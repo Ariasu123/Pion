@@ -10,7 +10,7 @@ compaction when the conversation approaches the model's context window.
 from .. import __version__
 from ..config import default_config_path
 from ..mcp import MCPClientManager
-from ..sandbox import build_runtime, check_docker_available
+from ..sandbox import build_runtime
 from ._shared import console, err_console
 from .app import app, main, mcp_command
 from .bootstrap import (
@@ -53,7 +53,6 @@ __all__ = [
     "app",
     "build_runtime",
     "build_system_prompt",
-    "check_docker_available",
     "configure_profile",
     "console",
     "default_config_path",

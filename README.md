@@ -17,11 +17,11 @@ Pion is a lightweight, extensible Python coding agent inspired by the open-sourc
 - **Small, readable core** — a streamed agent loop with parallel tool execution and hooks.
 - **Terminal-native workflow** — an inline TUI that keeps the conversation in your scrollback.
 - **Open extension surface** — add Python tools, lifecycle hooks, slash commands, or stdio MCP servers.
-- **Optional isolation** — run file and shell tools through the standalone [sandbox-docker-mcp](https://github.com/Ariasu123/Agent-Toolkit/tree/main/Personal/MCP-Hub/sandbox-docker-mcp) package.
+- **Optional isolation** — run file and shell tools inside Docker via the standalone [sandbox-docker-mcp](https://github.com/Ariasu123/Agent-Toolkit/tree/main/Personal/MCP-Hub/sandbox-docker-mcp) MCP server, installed on demand through the `sandbox` extra (not part of the default install).
 
 ## Quick start
 
-The one-line installer supports macOS and Linux. It installs [uv](https://docs.astral.sh/uv/) when needed; uv then provides a compatible Python runtime. Docker is optional and only required for sandboxed execution.
+The one-line installer supports macOS and Linux. It installs [uv](https://docs.astral.sh/uv/) when needed; uv then provides a compatible Python runtime. The default install runs tools on the host; both Docker and the optional `sandbox` extra are needed only for sandboxed execution (`--sandbox mcp`, see below).
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/Ariasu123/Pion/main/install.sh | sh
@@ -117,7 +117,15 @@ Pion currently supports MCP tools over stdio, not resources, prompts, or Streama
 <details>
 <summary><strong>Docker sandbox</strong></summary>
 
-`uv run pion --sandbox mcp` starts the independently maintained [sandbox-docker-mcp](https://github.com/Ariasu123/Agent-Toolkit/tree/main/Personal/MCP-Hub/sandbox-docker-mcp) server through Pion's compatibility entry point. It runs in a disposable, non-root container. Only the current project is bind-mounted; Git metadata is read-only by default, protected files such as `.env` are masked, and host environment variables and the Docker socket are not injected.
+The sandbox runs as a separate `pion mcp` server process, so its code ships as an optional `sandbox` extra that is **not** installed by default. Install the extra (the main `pion` process is only an MCP client and never imports it) and make sure the Docker engine is running:
+
+```bash
+uv tool install 'pion[sandbox] @ git+https://github.com/Ariasu123/Pion.git'   # global tool
+pip install 'pion[sandbox] @ git+https://github.com/Ariasu123/Pion.git'       # into an environment
+uv sync --extra sandbox                                                        # from a source checkout
+```
+
+`uv run pion --sandbox mcp` starts the independently maintained [sandbox-docker-mcp](https://github.com/Ariasu123/Agent-Toolkit/tree/main/Personal/MCP-Hub/sandbox-docker-mcp) server through Pion's compatibility entry point. It runs in a disposable, non-root container. Only the current project is bind-mounted; Git metadata is read-only by default, protected files such as `.env` are masked, and host environment variables and the Docker socket are not injected. If the extra is missing or Docker is not running, `pion mcp` prints a clear error and the CLI fails fast instead of starting with no tools.
 
 Useful options: `--sandbox-image IMAGE`, `--sandbox-network bridge|none`, `--sandbox-git-write`, and `--allow-project-extensions`. The default bridge network permits outbound access; use `--sandbox-network none` for untrusted repositories. Project extensions execute on the host and are disabled in sandbox mode unless explicitly allowed.
 

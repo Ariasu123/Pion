@@ -14,8 +14,13 @@ from .base import (
     SandboxSettings,
     SandboxUnavailableError,
 )
-from .docker import DockerSandboxRuntime, check_docker_available
 from .workspace import WorkspaceAccessError, WorkspaceGuard
+
+# NOTE: the Docker sandbox adapter (`.docker`) is intentionally NOT imported
+# here. It pulls in the optional `sandbox_docker_mcp` package, which only the
+# `pion mcp` server child process needs. Importing it at package import time
+# would make the whole CLI crash when the optional extra is absent, even for
+# the default `--sandbox off` mode.
 
 
 def build_runtime(settings: SandboxSettings, workspace: Path) -> SandboxRuntime:
@@ -35,7 +40,6 @@ def build_runtime(settings: SandboxSettings, workspace: Path) -> SandboxRuntime:
 
 
 __all__ = [
-    "DockerSandboxRuntime",
     "HostSandboxRuntime",
     "SandboxBackend",
     "SandboxCommandResult",
@@ -47,5 +51,4 @@ __all__ = [
     "WorkspaceAccessError",
     "WorkspaceGuard",
     "build_runtime",
-    "check_docker_available",
 ]

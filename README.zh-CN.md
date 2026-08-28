@@ -17,11 +17,11 @@ Pion 是一个受开源项目 pi agent 启发的轻量、可扩展 Python 编码
 - **小而清晰的核心** —— 流式 Agent 循环、并行工具执行和生命周期钩子。
 - **原生终端工作流** —— 内联 TUI 将完整对话保留在终端 scrollback 中。
 - **开放的扩展能力** —— 添加 Python 工具、钩子、斜杠命令或 stdio MCP 服务。
-- **可选隔离执行** —— 通过独立开源的 [sandbox-docker-mcp](https://github.com/Ariasu123/Agent-Toolkit/tree/main/Personal/MCP-Hub/sandbox-docker-mcp) 将文件和 shell 工具放入一次性 Docker 沙盒。
+- **可选隔离执行** —— 通过独立开源的 [sandbox-docker-mcp](https://github.com/Ariasu123/Agent-Toolkit/tree/main/Personal/MCP-Hub/sandbox-docker-mcp) MCP server 把文件和 shell 工具放进一次性 Docker 沙盒；它作为可选的 `sandbox` extra 按需安装，默认安装不包含。
 
 ## 快速开始
 
-一键安装器支持 macOS 和 Linux。缺少 [uv](https://docs.astral.sh/uv/) 时会自动安装，uv 随后会提供兼容的 Python 运行时。Docker 是可选依赖，仅在沙盒执行时需要。
+一键安装器支持 macOS 和 Linux。缺少 [uv](https://docs.astral.sh/uv/) 时会自动安装，uv 随后会提供兼容的 Python 运行时。默认安装的工具都在宿主机运行；Docker 引擎与可选的 `sandbox` extra 仅在沙盒执行（`--sandbox mcp`，见下文）时才需要。
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/Ariasu123/Pion/main/install.sh | sh
@@ -117,7 +117,15 @@ Pion 目前只支持基于 stdio 的 MCP tools，尚不支持 resources、prompt
 <details>
 <summary><strong>Docker 沙盒</strong></summary>
 
-`uv run pion --sandbox mcp` 会通过 Pion 的兼容入口启动独立维护的 [sandbox-docker-mcp](https://github.com/Ariasu123/Agent-Toolkit/tree/main/Personal/MCP-Hub/sandbox-docker-mcp)。服务运行在一次性非 root 容器中，只绑定挂载当前项目；Git 元数据默认只读，`.env` 等受保护文件会被遮蔽，宿主环境变量和 Docker socket 不会注入。
+沙盒以独立的 `pion mcp` server 子进程运行，因此其代码是可选的 `sandbox` extra，**默认不安装**。安装该 extra（主进程 `pion` 只是 MCP client，永远不 import 它），并确保本机 Docker 引擎已启动：
+
+```bash
+uv tool install 'pion[sandbox] @ git+https://github.com/Ariasu123/Pion.git'   # 全局工具
+pip install 'pion[sandbox] @ git+https://github.com/Ariasu123/Pion.git'       # 安装进某个环境
+uv sync --extra sandbox                                                        # 源码目录内
+```
+
+`uv run pion --sandbox mcp` 会通过 Pion 的兼容入口启动独立维护的 [sandbox-docker-mcp](https://github.com/Ariasu123/Agent-Toolkit/tree/main/Personal/MCP-Hub/sandbox-docker-mcp)。服务运行在一次性非 root 容器中，只绑定挂载当前项目；Git 元数据默认只读，`.env` 等受保护文件会被遮蔽，宿主环境变量和 Docker socket 不会注入。若缺少该 extra 或 Docker 未启动，`pion mcp` 会打印清晰的错误，CLI 随即 fail-fast，而不是在没有工具的情况下启动。
 
 常用选项包括 `--sandbox-image IMAGE`、`--sandbox-network bridge|none`、`--sandbox-git-write` 和 `--allow-project-extensions`。默认 bridge 网络允许出站访问；处理不可信仓库时请使用 `--sandbox-network none`。项目 extension 在宿主机执行，因此沙盒模式下默认禁用，除非显式允许。
 

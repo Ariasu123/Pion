@@ -9,18 +9,28 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
-
-from sandbox_docker_mcp.server import serve as external_serve
 
 from ..config import load_config
 from ..sandbox import (
-    DockerSandboxRuntime,
     HostSandboxRuntime,
+    SandboxError,
     SandboxRuntime,
     SandboxSettings,
 )
-from ..sandbox.docker import to_external_settings
+
+# The optional `sandbox_docker_mcp` package (the `sandbox` extra) is imported
+# lazily inside serve()/build_server_runtime() so that importing this module
+# — e.g. `from pion.mcp import sandbox_server` — never requires the extra. Only
+# this `pion mcp` server process actually runs the Docker sandbox.
+_MISSING_SANDBOX_EXTRA = (
+    "pion mcp: the Docker sandbox needs the optional 'sandbox' extra "
+    "(package sandbox_docker_mcp). Install it with:\n"
+    "  pip install 'pion[sandbox] @ "
+    "git+https://github.com/Ariasu123/Agent-Toolkit.git"
+    "#subdirectory=Personal/MCP-Hub/sandbox-docker-mcp'"
+)
 
 
 def resolve_server_settings() -> SandboxSettings:
@@ -74,12 +84,34 @@ def build_server_runtime(settings: SandboxSettings, workspace: Path) -> SandboxR
 
     if os.environ.get("PION_SANDBOX_BACKEND") == "off":
         return HostSandboxRuntime(workspace, settings)
+    from ..sandbox.docker import DockerSandboxRuntime
+
     return DockerSandboxRuntime(workspace, settings)  # type: ignore[return-value]
 
 
 async def serve(workspace: Path | None = None) -> None:
+    try:
+        from sandbox_docker_mcp.server import serve as external_serve
+
+        from ..sandbox.docker import check_docker_available, to_external_settings
+    except ModuleNotFoundError as exc:
+        print(f"{_MISSING_SANDBOX_EXTRA}\n({exc})", file=sys.stderr)
+        raise SystemExit(1) from exc
+
     active_workspace = workspace or Path.cwd()
     settings = resolve_server_settings()
+
+    # Preflight Docker here, in the `pion mcp` server child that owns the
+    # optional dependency, so a stopped daemon fails with a clear stderr message
+    # (relayed to the user's terminal) instead of surfacing in the parent as an
+    # opaque MCP connection failure. Skipped for the host test-compat backend.
+    if os.environ.get("PION_SANDBOX_BACKEND") != "off":
+        try:
+            await check_docker_available()
+        except SandboxError as exc:
+            print(f"pion mcp: Docker sandbox unavailable: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+
     runtime = build_server_runtime(settings, active_workspace)
     await external_serve(
         workspace=active_workspace,

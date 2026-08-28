@@ -145,6 +145,9 @@ class ExtensionManager:
         self._api = ExtensionAPI(self)
         self._files: list[Path] = []
         self._load_counter = 0
+        #: sys.modules names created by _load_file, so reload() can unload the
+        #: previous generation instead of leaking a copy on every reload.
+        self._module_names: list[str] = []
 
     @property
     def api(self) -> ExtensionAPI:
@@ -180,17 +183,28 @@ class ExtensionManager:
         self._files = [
             file for directory in extension_dirs for file in sorted(Path(directory).glob("*.py"))
         ]
+        self._reset_registrations()
         await self._load_all()
 
     async def reload(self) -> None:
         """Re-import all loaded extension files and re-run setup().
 
-        Handler tables, commands and tools are rebuilt from scratch.
+        Handler tables, commands, tools and errors are rebuilt from scratch,
+        and the modules imported by the previous generation are unloaded so
+        repeated reloads don't leak a copy each time.
         """
+        self._reset_registrations()
+        await self._load_all()
+
+    def _reset_registrations(self) -> None:
+        """Clear all handler/tool/command/error tables and unload old modules."""
         self.handlers = {name: [] for name in KNOWN_EVENTS}
         self.tools = []
         self.commands = {}
-        await self._load_all()
+        self.errors = []
+        for name in self._module_names:
+            sys.modules.pop(name, None)
+        self._module_names = []
 
     async def _load_all(self) -> None:
         for path in self._files:
@@ -209,6 +223,7 @@ class ExtensionManager:
             )
             module.__file__ = str(path)
             sys.modules[module_name] = module
+            self._module_names.append(module_name)
             code = compile(path.read_text(encoding="utf-8"), str(path), "exec")
             exec(code, module.__dict__)
             setup = getattr(module, "setup", None)
@@ -232,17 +247,22 @@ class ExtensionManager:
                 result = await _maybe_await(
                     handler(BeforeAgentStartEvent(prompt=prompt, system_prompt=system_prompt))
                 )
+                if not result:
+                    continue
+                if not isinstance(result, dict):
+                    raise TypeError(
+                        "before_agent_start handler must return a dict or None, "
+                        f"got {type(result).__name__}"
+                    )
+                replacement = result.get("system_prompt")
+                if replacement:
+                    system_prompt = replacement
+                messages = result.get("messages")
+                if messages:
+                    injected.extend(messages)
             except Exception as exc:
                 self.errors.append(exc)
                 continue
-            if not result:
-                continue
-            replacement = result.get("system_prompt")
-            if replacement:
-                system_prompt = replacement
-            messages = result.get("messages")
-            if messages:
-                injected.extend(messages)
         return system_prompt, injected
 
     async def apply_context(self, messages: list[Message]) -> list[Message]:
@@ -251,11 +271,17 @@ class ExtensionManager:
         for handler in self.handlers["context"]:
             try:
                 result = await _maybe_await(handler(current))
+                if result is None:
+                    continue
+                if not isinstance(result, list):
+                    raise TypeError(
+                        "context handler must return a list of messages or None, "
+                        f"got {type(result).__name__}"
+                    )
+                current = result
             except Exception as exc:
                 self.errors.append(exc)
                 continue
-            if result is not None:
-                current = result
         return current
 
     async def run_tool_call(self, event: ToolCallEvent) -> Optional[dict]:

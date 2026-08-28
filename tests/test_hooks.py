@@ -68,6 +68,11 @@ def setup(api):
     api.on("context", boom)
 '''
 
+SETUP_FAILS_EXTENSION = '''
+def setup(api):
+    raise RuntimeError("setup boom")
+'''
+
 
 def write_extension(tmp_path, source: str, name: str = "myext.py"):
     ext_dir = tmp_path / "extensions"
@@ -242,3 +247,56 @@ async def test_reload_picks_up_file_changes(tmp_path):
 
     results = [m for m in agent.messages if isinstance(m, ToolResultMessage)]
     assert results[0].text() == "hi-v2:yo"
+
+
+async def test_reload_clears_errors_and_unloads_modules(tmp_path):
+    import sys
+
+    ext_dir, _ = write_extension(tmp_path, SETUP_FAILS_EXTENSION, name="boom.py")
+    manager = ExtensionManager()
+    await manager.load([ext_dir])
+    assert len(manager.errors) == 1  # setup() raised
+
+    def boom_modules() -> int:
+        return sum(1 for name in sys.modules if name.startswith("_pion_extension_boom_"))
+
+    before = boom_modules()
+    await manager.reload()
+
+    # errors are reset (still exactly one, not accumulated across reloads)
+    assert len(manager.errors) == 1
+    # the previous generation's module copy was unloaded, so the count of
+    # leaked modules does not grow with each reload.
+    assert boom_modules() == before
+
+
+async def test_before_agent_start_bad_return_is_isolated():
+    manager = ExtensionManager()
+    # A handler returning a non-dict must be caught, not crash the agent.
+    manager.api.on("before_agent_start", lambda event: ["not", "a", "dict"])
+
+    scripts = [{"text": "ok"}]
+    agent, calls = make_hooked_agent(scripts, manager)
+    agent.system_prompt = "BASE"
+    final = await agent.prompt("go")
+
+    assert final.text() == "ok"
+    assert calls[0]["context"].system_prompt == "BASE"  # unchanged
+    assert len(manager.errors) == 1
+    assert isinstance(manager.errors[0], TypeError)
+
+
+async def test_context_bad_return_is_isolated():
+    manager = ExtensionManager()
+    # A context handler must return list[Message] or None; a dict is rejected.
+    manager.api.on("context", lambda messages: {"not": "a list"})
+
+    scripts = [{"text": "ok"}]
+    agent, calls = make_hooked_agent(scripts, manager)
+    final = await agent.prompt("go")
+
+    assert final.text() == "ok"
+    # The bad return was discarded; the real message list reached the LLM.
+    assert isinstance(calls[0]["context"].messages, list)
+    assert len(manager.errors) == 1
+    assert isinstance(manager.errors[0], TypeError)
